@@ -108,15 +108,23 @@ function buildGlyphVerts(strokes) {
 // Coords in [0,1]×[0,1], y=0 top
 const π = Math.PI;
 
+// Generate true Archimedean spiral as L-segment stroke
+function mkSpiral(cx,cy,r0,r1,a0,sweep,n){const s=[];for(let i=0;i<n;i++){const t0=i/n,t1=(i+1)/n;const a_0=a0+t0*sweep,a_1=a0+t1*sweep;const rr0=r0+(r1-r0)*t0,rr1=r0+(r1-r0)*t1;s.push({type:'L',pts:[[cx+Math.cos(a_0)*rr0,cy+Math.sin(a_0)*rr0],[cx+Math.cos(a_1)*rr1,cy+Math.sin(a_1)*rr1]]});}return s;}
+
 const GLYPHS_DEF = [
 
-  // 0 — Eye of Horus
+  // 0 — Eye of Horus (V3)
   [
-    [{type:'Q',pts:[[0.05,0.38],[0.5,0.14],[0.95,0.38]]}],
-    [{type:'Q',pts:[[0.95,0.38],[0.5,0.62],[0.05,0.38]]}],
-    [{type:'arc',cx:0.5,cy:0.38,rx:0.13,ry:0.13,a0:0,a1:6.2832}],
-    [{type:'L',pts:[[0.5,0.51],[0.36,0.76],[0.25,0.68]]}],
-    [{type:'L',pts:[[0.36,0.76],[0.58,0.84]]}],
+    [{type:'C',pts:[[0.20,0.08],[0.14,0.14],[0.08,0.12],[0.12,0.04]]}],
+    [{type:'C',pts:[[0.20,0.08],[0.44,0.00],[0.72,0.00],[0.96,0.10]]}],
+    [{type:'C',pts:[[0.04,0.38],[0.24,0.24],[0.58,0.22],[0.96,0.34]]}],
+    [{type:'C',pts:[[0.96,0.34],[0.68,0.50],[0.32,0.54],[0.04,0.38]]}],
+    [{type:'arc',cx:0.42,cy:0.38,rx:0.13,ry:0.12,a0:0,a1:6.2832}],
+    [{type:'arc',cx:0.42,cy:0.38,rx:0.06,ry:0.06,a0:0,a1:6.2832}],
+    [{type:'C',pts:[[0.22,0.52],[0.20,0.66],[0.18,0.80],[0.16,0.94]]}],
+    [{type:'C',pts:[[0.24,0.50],[0.14,0.58],[0.06,0.52],[0.12,0.40]]}],
+    [{type:'C',pts:[[0.36,0.54],[0.52,0.64],[0.66,0.72],[0.76,0.78]]}],
+    mkSpiral(0.82,0.80,0.14,0.02,1.8,-11,60),
   ],
 
   // 1 — Ankh
@@ -126,14 +134,14 @@ const GLYPHS_DEF = [
     [{type:'L',pts:[[0.15,0.58],[0.85,0.58]]}],
   ],
 
-  // 2 — Seated figure
+  // 2 — Eve's apple (heart shape)
   [
-    [{type:'arc',cx:0.5,cy:0.1,rx:0.09,ry:0.09,a0:0,a1:6.2832}],
-    [{type:'L',pts:[[0.5,0.19],[0.5,0.56]]}],
-    [{type:'L',pts:[[0.5,0.32],[0.22,0.45]]}],
-    [{type:'L',pts:[[0.5,0.32],[0.78,0.42]]}],
-    [{type:'L',pts:[[0.5,0.56],[0.30,0.92]]}],
-    [{type:'L',pts:[[0.5,0.56],[0.65,0.92],[0.82,0.78]]}],
+    [{type:'C',pts:[[0.50,0.30],[0.20,0.28],[0.10,0.55],[0.20,0.80]]}],
+    [{type:'C',pts:[[0.20,0.80],[0.30,0.94],[0.44,0.96],[0.50,0.88]]}],
+    [{type:'C',pts:[[0.50,0.88],[0.56,0.96],[0.70,0.94],[0.80,0.80]]}],
+    [{type:'C',pts:[[0.80,0.80],[0.90,0.55],[0.80,0.28],[0.50,0.30]]}],
+    [{type:'L',pts:[[0.50,0.30],[0.48,0.10]]}],
+    [{type:'Q',pts:[[0.48,0.10],[0.58,0.02],[0.68,0.08]]}],
   ],
 
   // 3 — Scarab
@@ -150,75 +158,64 @@ const GLYPHS_DEF = [
     [{type:'L',pts:[[0.80,0.66],[0.96,0.74]]}],
   ],
 
-  // 4 — Reed / feather
+  // 4 — True Archimedean spiral
   [
-    [{type:'L',pts:[[0.5,0.97],[0.5,0.03]]}],
-    [{type:'Q',pts:[[0.5,0.08],[0.74,0.04],[0.80,0.09]]}],
-    [{type:'Q',pts:[[0.5,0.08],[0.26,0.04],[0.20,0.09]]}],
-    [{type:'Q',pts:[[0.5,0.18],[0.74,0.14],[0.80,0.19]]}],
-    [{type:'Q',pts:[[0.5,0.18],[0.26,0.14],[0.20,0.19]]}],
-    [{type:'Q',pts:[[0.5,0.28],[0.74,0.24],[0.80,0.29]]}],
-    [{type:'Q',pts:[[0.5,0.28],[0.26,0.24],[0.20,0.29]]}],
-    [{type:'Q',pts:[[0.5,0.38],[0.74,0.34],[0.80,0.39]]}],
-    [{type:'Q',pts:[[0.5,0.38],[0.26,0.34],[0.20,0.39]]}],
-    [{type:'Q',pts:[[0.5,0.48],[0.74,0.44],[0.80,0.49]]}],
+    mkSpiral(0.50,0.50,0.42,0.03,0,-18.85,80),
   ],
 
-  // 5 — Falcon
+  // 5 — Key
   [
-    [{type:'arc',cx:0.65,cy:0.16,rx:0.10,ry:0.10,a0:0,a1:6.2832}],
-    [{type:'L',pts:[[0.73,0.20],[0.88,0.26],[0.73,0.28]]}],
-    [{type:'Q',pts:[[0.60,0.26],[0.50,0.52],[0.42,0.86]]}],
-    [{type:'L',pts:[[0.42,0.86],[0.22,0.96]]}],
-    [{type:'L',pts:[[0.42,0.86],[0.40,0.97]]}],
-    [{type:'Q',pts:[[0.56,0.34],[0.28,0.24],[0.04,0.32]]}],
-    [{type:'Q',pts:[[0.56,0.34],[0.76,0.30],[0.92,0.46]]}],
+    [{type:'arc',cx:0.50,cy:0.22,rx:0.16,ry:0.16,a0:0,a1:6.2832}],
+    [{type:'L',pts:[[0.50,0.38],[0.50,0.92]]}],
+    [{type:'L',pts:[[0.50,0.72],[0.65,0.72]]}],
+    [{type:'L',pts:[[0.65,0.72],[0.65,0.78]]}],
+    [{type:'L',pts:[[0.50,0.82],[0.62,0.82]]}],
+    [{type:'L',pts:[[0.62,0.82],[0.62,0.88]]}],
+    [{type:'arc',cx:0.50,cy:0.22,rx:0.09,ry:0.09,a0:0,a1:6.2832}],
   ],
 
-  // 6 — Djed pillar
+  // 6 — Dog (Anubis, two ears)
   [
-    [{type:'L',pts:[[0.5,0.95],[0.5,0.10]]}],
-    [{type:'L',pts:[[0.26,0.95],[0.74,0.95]]}],
-    [{type:'L',pts:[[0.30,0.84],[0.70,0.84]]}],
-    [{type:'L',pts:[[0.34,0.73],[0.66,0.73]]}],
-    [{type:'L',pts:[[0.38,0.62],[0.62,0.62]]}],
-    [{type:'L',pts:[[0.32,0.10],[0.68,0.10]]}],
-    [{type:'L',pts:[[0.36,0.03],[0.64,0.03]]}],
+    [{type:'C',pts:[[0.30,0.82],[0.28,0.60],[0.26,0.40],[0.32,0.28]]}],
+    [{type:'C',pts:[[0.32,0.28],[0.36,0.18],[0.40,0.12],[0.46,0.10]]}],
+    [{type:'Q',pts:[[0.46,0.10],[0.56,0.06],[0.62,0.14]]}],
+    [{type:'L',pts:[[0.62,0.14],[0.58,0.20]]}],
+    [{type:'C',pts:[[0.42,0.16],[0.38,0.06],[0.32,0.00],[0.34,0.12]]}],
+    [{type:'C',pts:[[0.48,0.14],[0.46,0.04],[0.42,0.00],[0.40,0.10]]}],
+    [{type:'C',pts:[[0.40,0.24],[0.48,0.28],[0.58,0.34],[0.64,0.42]]}],
+    [{type:'C',pts:[[0.64,0.42],[0.68,0.52],[0.68,0.64],[0.64,0.72]]}],
+    [{type:'C',pts:[[0.64,0.72],[0.62,0.78],[0.66,0.58],[0.74,0.46]]}],
+    [{type:'arc',cx:0.50,cy:0.14,rx:0.02,ry:0.02,a0:0,a1:6.2832}],
   ],
 
-  // 7 — Uraeus serpent
+  // 7 — Serpent (forked tongue)
   [
     [{type:'C',pts:[[0.50,0.96],[0.12,0.96],[0.12,0.56],[0.50,0.56]]}],
     [{type:'C',pts:[[0.50,0.56],[0.88,0.56],[0.88,0.24],[0.54,0.16]]}],
     [{type:'C',pts:[[0.54,0.16],[0.38,0.11],[0.34,0.04],[0.43,0.01]]}],
     [{type:'Q',pts:[[0.43,0.01],[0.67,0.04],[0.64,0.18]]}],
     [{type:'arc',cx:0.45,cy:0.03,rx:0.04,ry:0.04,a0:0,a1:6.2832}],
+    [{type:'L',pts:[[0.64,0.18],[0.72,0.12]]}],
+    [{type:'L',pts:[[0.64,0.18],[0.70,0.22]]}],
   ],
 
-  // 8 — Sun disk with rays
+  // 8 — Infinity (wide & short)
   [
-    [{type:'arc',cx:0.5,cy:0.5,rx:0.20,ry:0.20,a0:0,a1:6.2832}],
-    [{type:'L',pts:[[0.5+Math.cos(0/12*6.2832)*0.23,0.5+Math.sin(0/12*6.2832)*0.23],[0.5+Math.cos(0/12*6.2832)*0.40,0.5+Math.sin(0/12*6.2832)*0.40]]}],
-    [{type:'L',pts:[[0.5+Math.cos(1/12*6.2832)*0.23,0.5+Math.sin(1/12*6.2832)*0.23],[0.5+Math.cos(1/12*6.2832)*0.40,0.5+Math.sin(1/12*6.2832)*0.40]]}],
-    [{type:'L',pts:[[0.5+Math.cos(2/12*6.2832)*0.23,0.5+Math.sin(2/12*6.2832)*0.23],[0.5+Math.cos(2/12*6.2832)*0.40,0.5+Math.sin(2/12*6.2832)*0.40]]}],
-    [{type:'L',pts:[[0.5+Math.cos(3/12*6.2832)*0.23,0.5+Math.sin(3/12*6.2832)*0.23],[0.5+Math.cos(3/12*6.2832)*0.40,0.5+Math.sin(3/12*6.2832)*0.40]]}],
-    [{type:'L',pts:[[0.5+Math.cos(4/12*6.2832)*0.23,0.5+Math.sin(4/12*6.2832)*0.23],[0.5+Math.cos(4/12*6.2832)*0.40,0.5+Math.sin(4/12*6.2832)*0.40]]}],
-    [{type:'L',pts:[[0.5+Math.cos(5/12*6.2832)*0.23,0.5+Math.sin(5/12*6.2832)*0.23],[0.5+Math.cos(5/12*6.2832)*0.40,0.5+Math.sin(5/12*6.2832)*0.40]]}],
-    [{type:'L',pts:[[0.5+Math.cos(6/12*6.2832)*0.23,0.5+Math.sin(6/12*6.2832)*0.23],[0.5+Math.cos(6/12*6.2832)*0.40,0.5+Math.sin(6/12*6.2832)*0.40]]}],
-    [{type:'L',pts:[[0.5+Math.cos(7/12*6.2832)*0.23,0.5+Math.sin(7/12*6.2832)*0.23],[0.5+Math.cos(7/12*6.2832)*0.40,0.5+Math.sin(7/12*6.2832)*0.40]]}],
-    [{type:'L',pts:[[0.5+Math.cos(8/12*6.2832)*0.23,0.5+Math.sin(8/12*6.2832)*0.23],[0.5+Math.cos(8/12*6.2832)*0.40,0.5+Math.sin(8/12*6.2832)*0.40]]}],
+    [{type:'C',pts:[[0.50,0.50],[0.50,0.28],[0.92,0.28],[0.92,0.50]]}],
+    [{type:'C',pts:[[0.92,0.50],[0.92,0.72],[0.50,0.72],[0.50,0.50]]}],
+    [{type:'C',pts:[[0.50,0.50],[0.50,0.72],[0.08,0.72],[0.08,0.50]]}],
+    [{type:'C',pts:[[0.08,0.50],[0.08,0.28],[0.50,0.28],[0.50,0.50]]}],
   ],
 
-  // 9 — Was scepter
+  // 9 — Flower of life
   [
-    [{type:'L',pts:[[0.5,0.80],[0.5,0.22]]}],
-    [{type:'L',pts:[[0.5,0.97],[0.34,0.80]]}],
-    [{type:'L',pts:[[0.34,0.80],[0.66,0.80]]}],
-    [{type:'L',pts:[[0.66,0.80],[0.5,0.97]]}],
-    [{type:'Q',pts:[[0.5,0.22],[0.67,0.15],[0.71,0.07]]}],
-    [{type:'Q',pts:[[0.5,0.22],[0.33,0.09],[0.37,0.02]]}],
-    [{type:'L',pts:[[0.37,0.02],[0.65,0.04]]}],
-    [{type:'arc',cx:0.5,cy:0.24,rx:0.09,ry:0.09,a0:0,a1:6.2832}],
+    [{type:'arc',cx:0.50,cy:0.50,rx:0.22,ry:0.22,a0:0,a1:6.2832}],
+    [{type:'arc',cx:0.50,cy:0.28,rx:0.22,ry:0.22,a0:0,a1:6.2832}],
+    [{type:'arc',cx:0.50,cy:0.72,rx:0.22,ry:0.22,a0:0,a1:6.2832}],
+    [{type:'arc',cx:0.31,cy:0.39,rx:0.22,ry:0.22,a0:0,a1:6.2832}],
+    [{type:'arc',cx:0.69,cy:0.39,rx:0.22,ry:0.22,a0:0,a1:6.2832}],
+    [{type:'arc',cx:0.31,cy:0.61,rx:0.22,ry:0.22,a0:0,a1:6.2832}],
+    [{type:'arc',cx:0.69,cy:0.61,rx:0.22,ry:0.22,a0:0,a1:6.2832}],
   ],
 ];
 
@@ -433,7 +430,7 @@ async function main(){
   const CELL_STRIDE=20;
 
   function buildWGSL(){return `
-struct Uniforms{cols:u32,rows:u32,cellW:f32,cellH:f32,vpW:f32,vpH:f32,halfW:f32,};
+struct Uniforms{cols:u32,rows:u32,cellW:f32,cellH:f32,vpW:f32,vpH:f32,halfW:f32,scrollY:f32,};
 struct CellData{morphT:f32,alpha:f32,glyphA:u32,glyphB:u32,lineHW:f32,};
 @group(0)@binding(0) var<uniform> uni:Uniforms;
 @group(0)@binding(1) var<storage,read> gBuf:array<f32>;
@@ -447,10 +444,8 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
   let vA0=gp(cell.glyphA,si,sgi);let vA1=gp(cell.glyphA,si,sgi+1u);
   let vB0=gp(cell.glyphB,si,sgi);let vB1=gp(cell.glyphB,si,sgi+1u);
   let t=cell.morphT;let p0=vA0+t*(vB0-vA0);let p1=vA1+t*(vB1-vA1);
-  let cx=f32(col)*uni.cellW;let cy=f32(row)*uni.cellH;
-  // Banner cells: map [0,1] to full cell bounds (no padding → seamless across cells)
-  // Non-banner: map [0,1] to padded interior
   let isBan=cell.lineHW>uni.halfW*1.1;
+  let cx=f32(col)*uni.cellW;let cy=f32(row)*uni.cellH;
   let ox=select((uni.cellW-f32(${SW}))*0.5,0.0,isBan);
   let oy=select((uni.cellH-f32(${SH}))*0.5,0.0,isBan);
   let sx=select(f32(${SW}),uni.cellW,isBan);
@@ -536,6 +531,8 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
 
   let prevCols=0,prevRows=0,t=0;
   const aN=alphaWaves.length,cN=charWaves.length;
+  const SCROLL_SPEED=0.3;
+  let scrollAccum=0, scrollRowInt=0;
 
   // ── Flat grids (rebuilt on resize) — no string keys in hot path ──
   let bannerGrid=null; // Int16Array, -1=not banner, else crop glyph idx
@@ -681,15 +678,17 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
         cs.isBanner=true;cs.bannerGlyph=bannerGrid[i];cs.letterInstance=bannerInstGrid[i];cs.glyphB=bannerGrid[i];}
       createMSAATexture();
       const u=new ArrayBuffer(32),ui=new Uint32Array(u),uf=new Float32Array(u);
-      ui[0]=COLS;ui[1]=ROWS;uf[2]=CELL_W;uf[3]=CELL_H;uf[4]=W;uf[5]=H;uf[6]=LINE_HALF_WIDTH*dpr;
+      ui[0]=COLS;ui[1]=ROWS;uf[2]=CELL_W;uf[3]=CELL_H;uf[4]=W;uf[5]=H;uf[6]=LINE_HALF_WIDTH*dpr;uf[7]=0;
       device.queue.writeBuffer(uniformBuf,0,u);
+      scrollAccum=0;
     }
     if(!pipeline||!cellBuf){requestAnimationFrame(frame);return;}
 
-    // Pre-compute per-frame constants
+    // bannerGrid is static (built on resize)
     bannerTotal=0;bannerFlickering=0;
-    for(let i=0;i<nCells&&i<cellStates.length;i++)
+    for(let i=0;i<nCells&&i<cellStates.length;i++){
       if(bannerGrid[i]>=0){bannerTotal++;if(cellStates[i].flickerTimer>0)bannerFlickering++;}
+    }
     const baseHW=LINE_HALF_WIDTH*dpr;
     const bHW=baseHW*2.2+Math.sin(t*0.07)*baseHW*0.5;
     const view32=new DataView(cellData);
