@@ -78,7 +78,8 @@ function sampleStroke(segs, n) {
   for (let i=0;i<n;i++) {
     const target = total*i/(n-1);
     let j = lens.findIndex(l=>l>=target);
-    if (j<=0) { result.push(dense[0]); continue; }
+    if (j<0) { result.push(dense[dense.length-1]); continue; }
+    if (j===0) { result.push(dense[0]); continue; }
     if (j>=dense.length) { result.push(dense[dense.length-1]); continue; }
     const t = (target-lens[j-1])/(lens[j]-lens[j-1]+1e-9);
     result.push([dense[j-1][0]+t*(dense[j][0]-dense[j-1][0]), dense[j-1][1]+t*(dense[j][1]-dense[j-1][1])]);
@@ -238,12 +239,12 @@ const GLYPHS_DEF = [
     [{type:'L',pts:[[0.64,0.18],[0.70,0.22]]}],
   ],
 
-  // 8 — Infinity
+  // 8 — Infinity (2 strokes, each a full lobe through center)
   [
-    [{type:'C',pts:[[0.50,0.50],[0.50,0.14],[0.94,0.14],[0.94,0.50]]}],
-    [{type:'C',pts:[[0.94,0.50],[0.94,0.86],[0.50,0.86],[0.50,0.50]]}],
-    [{type:'C',pts:[[0.50,0.50],[0.50,0.86],[0.06,0.86],[0.06,0.50]]}],
-    [{type:'C',pts:[[0.06,0.50],[0.06,0.14],[0.50,0.14],[0.50,0.50]]}],
+    // Right lobe: center → top-right → right → bottom-right → center
+    [{type:'C',pts:[[0.50,0.50],[0.50,0.14],[0.94,0.14],[0.94,0.50]]},{type:'C',pts:[[0.94,0.50],[0.94,0.86],[0.50,0.86],[0.50,0.50]]}],
+    // Left lobe: center → bottom-left → left → top-left → center
+    [{type:'C',pts:[[0.50,0.50],[0.50,0.86],[0.06,0.86],[0.06,0.50]]},{type:'C',pts:[[0.06,0.50],[0.06,0.14],[0.50,0.14],[0.50,0.50]]}],
   ],
 
   // 9 — Flower of life (central circle split for smoothness)
@@ -513,42 +514,71 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
   let useBanSizing=(cell.flags&1u)==1u;
   let inBanZone=(cell.flags&2u)==2u;
   let cx=f32(col)*uni.cellW;let cy=f32(row)*uni.cellH;
-  // Banner cells: fill the full cell (no aspect correction)
-  // Background cells: contain-fit using per-glyph aspect ratio
   var sx:f32;var sy:f32;var oxF:f32;var oyF:f32;
   if(useBanSizing){
     sx=uni.cellW;sy=uni.cellH;oxF=0.0;oyF=0.0;
   } else {
     let padSx=f32(${SW});let padSy=f32(${SH});
-    // Interpolate aspect ratio between glyphA and glyphB based on morph
     let aspA=gAspect[cell.glyphA];let aspB=gAspect[cell.glyphB];
     let ga=aspA+(aspB-aspA)*t;
     let cellAsp=padSx/padSy;
-    // Contain-fit: if glyph is wider than cell, constrain by width; else by height
-    if(ga>cellAsp){
-      sx=padSx;sy=padSx/ga;
-    } else {
-      sy=padSy;sx=padSy*ga;
-    }
+    if(ga>cellAsp){sx=padSx;sy=padSx/ga;}
+    else{sy=padSy;sx=padSy*ga;}
     oxF=(uni.cellW-sx)*0.5;
     oyF=(uni.cellH-sy)*0.5;
   }
   let px0=vec2f(cx+oxF+p0.x*sx,cy+oyF+p0.y*sy);
   let px1=vec2f(cx+oxF+p1.x*sx,cy+oyF+p1.y*sy);
-  let dir=px1-px0;let len=length(dir);
-  let perp=select(vec2f(1.0,0.0),vec2f(-dir.y,dir.x)/len,len>0.0001)*cell.lineHW;
+  let dir=px1-px0;let segLen=length(dir);
+  let ndir=select(vec2f(1.0,0.0),dir/segLen,segLen>0.0001);
+  let segPerp=vec2f(-ndir.y,ndir.x);
+
+  // Miter at px0: average direction with previous segment
+  let hasPrev=sgi>0u;
+  let prevPtA=gp(cell.glyphA,si,select(0u,sgi-1u,hasPrev));
+  let prevPtB=gp(cell.glyphB,si,select(0u,sgi-1u,hasPrev));
+  let pPrev=prevPtA+t*(prevPtB-prevPtA);
+  let pxPrev=vec2f(cx+oxF+pPrev.x*sx,cy+oyF+pPrev.y*sy);
+  let prevDir=px0-pxPrev;let prevLen=length(prevDir);
+  let nprev=select(ndir,prevDir/prevLen,hasPrev&&prevLen>0.0001);
+  let cosAngle0=dot(nprev,ndir);
+  let avg0=ndir+nprev;let avg0Len=length(avg0);
+  // For sharp angles (cos < 0.2, i.e. >~80° bend), use segment perpendicular (bevel)
+  let useAvg0=avg0Len>0.01&&cosAngle0>0.2;
+  let miterDir0=select(ndir,avg0/avg0Len,useAvg0);
+  let miterPerp0=vec2f(-miterDir0.y,miterDir0.x);
+  let dot0=max(abs(dot(miterPerp0,segPerp)),0.7);
+  let perp0=miterPerp0*cell.lineHW/dot0;
+
+  // Miter at px1: average direction with next segment
+  let hasNext=sgi<SPS-2u;
+  let nextPtA=gp(cell.glyphA,si,select(SPS-1u,sgi+2u,hasNext));
+  let nextPtB=gp(cell.glyphB,si,select(SPS-1u,sgi+2u,hasNext));
+  let pNext=nextPtA+t*(nextPtB-nextPtA);
+  let pxNext=vec2f(cx+oxF+pNext.x*sx,cy+oyF+pNext.y*sy);
+  let nextDir=pxNext-px1;let nextLen=length(nextDir);
+  let nnext=select(ndir,nextDir/nextLen,hasNext&&nextLen>0.0001);
+  let cosAngle1=dot(ndir,nnext);
+  let avg1=ndir+nnext;let avg1Len=length(avg1);
+  let useAvg1=avg1Len>0.01&&cosAngle1>0.2;
+  let miterDir1=select(ndir,avg1/avg1Len,useAvg1);
+  let miterPerp1=vec2f(-miterDir1.y,miterDir1.x);
+  let dot1=max(abs(dot(miterPerp1,segPerp)),0.7);
+  let perp1=miterPerp1*cell.lineHW/dot1;
+
   let ci2=array<u32,6>(0u,1u,2u,1u,3u,2u)[vi];
   var px:vec2f;var edge:f32;
-  switch(ci2){case 0u:{px=px0-perp;edge=-1.0;}case 1u:{px=px0+perp;edge=1.0;}case 2u:{px=px1-perp;edge=-1.0;}case 3u:{px=px1+perp;edge=1.0;}default:{px=px0;edge=0.0;}}
+  switch(ci2){case 0u:{px=px0-perp0;edge=-1.0;}case 1u:{px=px0+perp0;edge=1.0;}case 2u:{px=px1-perp1;edge=-1.0;}case 3u:{px=px1+perp1;edge=1.0;}default:{px=px0;edge=0.0;}}
   var out:VSOut;
-  out.pos=vec4f((px.x/uni.vpW*2.0-1.0)*uni.zoom+uni.panX, (1.0-px.y/uni.vpH*2.0)*uni.zoom+uni.panY, 0.0, 1.0);
+  out.pos=vec4f((px.x/uni.vpW*2.0-1.0)*uni.zoom+uni.panX,(1.0-px.y/uni.vpH*2.0)*uni.zoom+uni.panY,0.0,1.0);
   out.alpha=cell.alpha;out.edgeDist=edge;
   out.color=select(0.0,1.0,inBanZone);
   return out;}
 @fragment fn fs(in:VSOut)->@location(0) vec4f{
-  let d=abs(in.edgeDist);let aa=1.0-smoothstep(0.55,1.0,d);let a=in.alpha*aa;
+  let d=abs(in.edgeDist);let aa=1.0-smoothstep(0.55,1.0,d);
+  let a=in.alpha*aa;
   let col=mix(vec3f(0.72,0.70,0.82),vec3f(1.0,0.98,0.94),in.color);
-  return vec4f(col,a);}
+  return vec4f(col*a,a);}
 `;}
 
   const uniformBuf=device.createBuffer({size:48,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
@@ -611,8 +641,8 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
     pipeline=device.createRenderPipeline({layout:device.createPipelineLayout({bindGroupLayouts:[bgl]}),
       vertex:{module:shaderModule,entryPoint:'vs'},
       fragment:{module:shaderModule,entryPoint:'fs',targets:[{format:fmt,blend:{
-        color:{srcFactor:'src-alpha',dstFactor:'one-minus-src-alpha',operation:'add'},
-        alpha:{srcFactor:'one',dstFactor:'one-minus-src-alpha',operation:'add'}}}]},
+        color:{srcFactor:'one',dstFactor:'one',operation:'max'},
+        alpha:{srcFactor:'one',dstFactor:'one',operation:'max'}}}]},
       primitive:{topology:'triangle-list'},multisample:{count:4}});
     bindGroup=device.createBindGroup({layout:bgl,entries:[
       {binding:0,resource:{buffer:uniformBuf}},{binding:1,resource:{buffer:glyphBuf}},{binding:2,resource:{buffer:cellBuf}},{binding:3,resource:{buffer:aspectBuf}}]});
@@ -671,21 +701,24 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
 
   function drawFloaters(nCells){
     octx.clearRect(0,0,overlay.width,overlay.height);
-    // Apply zoom/pan transform matching the WebGPU shader
-    octx.save();
-    const cx=overlay.width/2, cy=overlay.height/2;
-    octx.translate(cx+panX*cx, cy-panY*cy);
-    octx.scale(zoomLevel,zoomLevel);
-    octx.translate(-cx,-cy);
 
+    // Draw the live trace in screen space (no zoom transform — follows the finger)
     if(drawing&&drawPoints.length>=2){
-      octx.strokeStyle='rgba(255,252,240,0.7)';octx.lineWidth=3/zoomLevel;
+      octx.strokeStyle='rgba(255,252,240,0.7)';octx.lineWidth=3;
       octx.lineCap='round';octx.lineJoin='round';octx.beginPath();
       octx.moveTo(drawPoints[0].x,drawPoints[0].y);
       for(let i=1;i<drawPoints.length;i++)octx.lineTo(drawPoints[i].x,drawPoints[i].y);
       octx.stroke();
     }
+
     if(floaters.length===0)return;
+
+    // Apply zoom/pan transform for floaters (they live in grid coordinates)
+    octx.save();
+    const cx=overlay.width/2, cy=overlay.height/2;
+    octx.translate(cx+panX*cx, cy-panY*cy);
+    octx.scale(zoomLevel,zoomLevel);
+    octx.translate(-cx,-cy);
 
     // Build cell→glyph lookup once
     const cg=new Int32Array(nCells);
@@ -891,6 +924,7 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
   // ── Pinch / zoom state ──
   let pinching=false, pinchDist0=0, pinchZoom0=1, pinchMidX=0, pinchMidY=0, pinchPanX0=0, pinchPanY0=0;
   let singlePanning=false, panStartX=0, panStartY=0, panPanX0=0, panPanY0=0;
+  let justPinched=false;
 
   function getTouchDist(e){
     const t=e.touches;
@@ -904,26 +938,18 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
 
   function startDraw(e){
     if(e.touches&&e.touches.length>=2){
-      // Start pinch
+      // Start pinch/pan
       e.preventDefault();
-      pinching=true;drawing=false;singlePanning=false;
+      pinching=true;drawing=false;justPinched=true;
       pinchDist0=getTouchDist(e);pinchZoom0=zoomLevel;
       const mid=getTouchMid(e);pinchMidX=mid[0];pinchMidY=mid[1];
       pinchPanX0=panX;pinchPanY0=panY;
       return;
     }
-    if(e.touches&&e.touches.length===1&&zoomLevel>1.05){
-      // Single-finger pan when zoomed in
-      e.preventDefault();
-      singlePanning=true;drawing=false;
-      panStartX=e.touches[0].clientX;panStartY=e.touches[0].clientY;
-      panPanX0=panX;panPanY0=panY;
-      return;
-    }
-    // Single touch/mouse: draw glyph
+    // Single touch/mouse: always draw
     const types=new Set();for(const f of floaters)types.add(f.gi);
     if(types.size>1)return;
-    e.preventDefault();drawing=true;pinching=false;singlePanning=false;drawPoints=[ptrPos(e)];
+    e.preventDefault();drawing=true;pinching=false;drawPoints=[ptrPos(e)];
   }
   function moveDraw(e){
     if(pinching&&e.touches&&e.touches.length>=2){
@@ -946,21 +972,12 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
       clampPan();
       return;
     }
-    if(singlePanning&&e.touches&&e.touches.length===1){
-      e.preventDefault();
-      const dx=(e.touches[0].clientX-panStartX)/window.innerWidth*2*zoomLevel;
-      const dy=-(e.touches[0].clientY-panStartY)/window.innerHeight*2*zoomLevel;
-      panX=panPanX0+dx;panY=panPanY0+dy;
-      clampPan();
-      return;
-    }
     if(!drawing)return;e.preventDefault();
     const p=ptrPos(e),last=drawPoints[drawPoints.length-1];
     if(Math.abs(p.x-last.x)+Math.abs(p.y-last.y)>2)drawPoints.push(p);
   }
   function endDraw(e){
     if(pinching){e.preventDefault();pinching=false;return;}
-    if(singlePanning){e.preventDefault();singlePanning=false;return;}
     if(!drawing)return;e.preventDefault();drawing=false;
     octx.clearRect(0,0,overlay.width,overlay.height);
     if(drawPoints.length<5)return;
@@ -1026,11 +1043,17 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
   cv.addEventListener('touchstart',startDraw,{passive:false});
   cv.addEventListener('touchmove',moveDraw,{passive:false});
   cv.addEventListener('touchend',function(e){
-    // If fingers drop from 2 to 1 during pinch, don't start drawing
-    if(pinching&&e.touches.length===1){e.preventDefault();pinching=false;singlePanning=false;return;}
+    // If fingers drop from 2 to 1 during pinch, just end the pinch — don't start drawing
+    if(pinching){
+      e.preventDefault();
+      if(e.touches.length<=1)pinching=false;
+      return;
+    }
     endDraw(e);
   },{passive:false});
-  cv.addEventListener('touchcancel',endDraw,{passive:false});
+  cv.addEventListener('touchcancel',function(e){
+    pinching=false;drawing=false;
+  },{passive:false});
 
   // Mouse wheel zoom (desktop)
   cv.addEventListener('wheel',function(e){
@@ -1040,20 +1063,22 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
     const oldZoom=zoomLevel;
     const factor=e.deltaY>0?0.9:1.1;
     zoomLevel=Math.max(MIN_ZOOM,Math.min(MAX_ZOOM,zoomLevel*factor));
-    // Zoom toward cursor
     panX=panX+clipX*(oldZoom-zoomLevel);
     panY=panY+clipY*(oldZoom-zoomLevel);
     clampPan();
   },{passive:false});
 
-  // Double-tap to reset zoom
+  // Double-tap to reset zoom (but not right after a pinch)
   let lastTap=0;
   cv.addEventListener('touchend',function(e){
+    if(e.touches.length>0)return;
     const now=Date.now();
-    if(now-lastTap<300&&e.touches.length===0){
-      zoomLevel=1.0;panX=0;panY=0;
+    if(justPinched){justPinched=false;lastTap=0;return;}
+    if(now-lastTap<300){
+      zoomLevel=1.0;panX=0;panY=0;lastTap=0;
+    } else {
+      lastTap=now;
     }
-    lastTap=now;
   },{passive:true});
 }
 function fallback(msg){document.getElementById('err').style.display='block';
