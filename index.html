@@ -792,11 +792,12 @@ fn toClip(px:vec2f)->vec2f{
   return out;
 }
 @fragment fn fs(in:VSOut)->@location(0) vec4f{
-  // SDF anti-aliasing using lineCoord
-  // d=0 at center, d=1 at geometry edge
-  // Solid core to ~0.45, fade to 0.85 matches original stroke visual width
   let d=length(in.lineCoord);
-  let aa=1.0-smoothstep(0.45,0.85,d);
+  // Resolution-independent AA: use fwidth to get pixel-sized transition band
+  let fw=fwidth(d);
+  // Solid core at 0.5 of hw, then AA over ~1.5 pixels
+  let edge=0.5;
+  let aa=1.0-smoothstep(edge-fw,edge+fw,d);
   if(aa<0.005){discard;}
   let a=in.alpha*aa;
   let col=mix(vec3f(0.72,0.70,0.82),vec3f(1.0,0.98,0.94),in.color);
