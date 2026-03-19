@@ -720,11 +720,11 @@ fn toClip(px:vec2f)->vec2f{
   // Use a gentle spatial field — low frequency waves across the glyph
   let sp0=p0.x*2.0+p0.y*2.0;
   let w0=sin(sp0*3.14159-uni.time*0.5+cellPhase)*0.5+0.5;
-  let mod0=mix(0.4,1.0,w0);
+  let mod0=mix(0.65,1.0,w0);
 
   let sp1=p1.x*2.0+p1.y*2.0;
   let w1=sin(sp1*3.14159-uni.time*0.5+cellPhase)*0.5+0.5;
-  let mod1=mix(0.4,1.0,w1);
+  let mod1=mix(0.65,1.0,w1);
 
   // Smoothly reduce modulation as banWeight increases (banner = constant width)
   let modDepth=1.0-bw;  // 1 for background, 0 for full banner
@@ -793,11 +793,7 @@ fn toClip(px:vec2f)->vec2f{
 }
 @fragment fn fs(in:VSOut)->@location(0) vec4f{
   let d=length(in.lineCoord);
-  // Resolution-independent AA: use fwidth to get pixel-sized transition band
-  let fw=fwidth(d);
-  // Solid core at 0.5 of hw, then AA over ~1.5 pixels
-  let edge=0.5;
-  let aa=1.0-smoothstep(edge-fw,edge+fw,d);
+  let aa=1.0-smoothstep(0.55,1.0,d);
   if(aa<0.005){discard;}
   let a=in.alpha*aa;
   let col=mix(vec3f(0.72,0.70,0.82),vec3f(1.0,0.98,0.94),in.color);
