@@ -1583,21 +1583,15 @@ fn toClip(px:vec2f)->vec2f{
   });
   await new Promise(r=>setTimeout(r,200));
   animating=false;
+  loaderBar.style.width='100%';
 
   // Compute the underline's screen position
-  // The underline is at row = startRow+LR, columns dCol to dCol+LC-1
-  // UNDERLINE_DEF goes from [0.1, 0.5] to [0.9, 0.5] within the letter cell area
   const ulRow=cr0.startRow+cr0.LR;
   const ulColStart=cr0.dCol>=0?cr0.dCol:cr0.startCol;
-  // The underline spans LC cells. Within each cell, the banner glyph fills the full cell.
-  // Y position: center of the underline row
   const ulY=(ulRow+0.5)*CELL_H/dpr;
-  // X position: from first underline cell's left edge to last cell's right edge
-  // The underline strokes at 0.1-0.9 within the LC-cell span
   const ulFullLeftX=ulColStart*CELL_W/dpr;
   const ulFullRightX=(ulColStart+cr0.LC)*CELL_W/dpr;
   const ulFullWidth=ulFullRightX-ulFullLeftX;
-  // Account for the 0.1-0.9 range of the underline definition
   const ulLeftX=ulFullLeftX+ulFullWidth*0.1;
   const ulRightX=ulFullLeftX+ulFullWidth*0.9;
   const ulWidth=ulRightX-ulLeftX;
@@ -1606,7 +1600,9 @@ fn toClip(px:vec2f)->vec2f{
   // Morph the loader bar to the underline position and width
   const loaderEl=document.getElementById('loader');
   if(loaderEl){
-    loaderEl.style.transition='all 0.6s ease-in-out';
+    loaderEl.style.background='rgb(255,252,240)';
+    loaderEl.offsetHeight;
+    loaderEl.style.transition='left 0.6s ease-in-out, top 0.6s ease-in-out, width 0.6s ease-in-out';
     loaderEl.style.left=ulCenterX+'px';
     loaderEl.style.top=ulY+'px';
     loaderEl.style.width=ulWidth+'px';
