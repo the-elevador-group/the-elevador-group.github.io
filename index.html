@@ -838,16 +838,14 @@ fn toClip(px:vec2f)->vec2f{
       default:{px=px0; out.lineCoord=vec2f(0.0,0.0);}
     }
   } else {
-    // Round caps — only at stroke endpoints, skip for interior segments
+    // Round caps — p0 cap only at stroke start, p1 cap at every segment (covers joints)
     let capVi=vi-6u;
     let capEnd=capVi/(CAP_S*3u);  // 0 = cap at px0, 1 = cap at px1
     
-    // Only emit cap at p0 for first segment of stroke (sgi==0)
-    // Only emit cap at p1 for last segment of stroke (sgi==sps-1)
-    let needCap=select(sgi==sps-1u, sgi==0u, capEnd==0u);
+    // Skip p0 cap for non-first segments (interior joints covered by previous segment's p1 cap)
+    let needCap=select(true, sgi==0u, capEnd==0u);
     
     if(!needCap || isGhost){
-      // Collapse to degenerate point
       out.pos=vec4f(toClip(px0),0.0,1.0);
       return out;
     }
