@@ -1267,40 +1267,75 @@ fn toClip(px:vec2f)->vec2f{
     const banBgHW=baseHW*1.35+Math.sin(t*0.07)*baseHW*0.15;
     bannerFlickering=0;
     const banFlickerLimit=bannerTotal*0.10;
-    const t016=t*0.016;
-    const STRIDE6=CELL_STRIDE/4; // stride in float32/uint32 units (24/4=6)
+    const STRIDE6=CELL_STRIDE/4;
 
-    for(let row=0;row<ROWS;row++){for(let col=0;col<COLS;col++){
+    // Precompute per-row partial sums for alpha waves: row*ky + t*speed + phase
+    // Then per-cell we only add col*kx and call sin
+    const aRowPartials=new Float64Array(aN);
+    const cRowPartials=new Float64Array(cN);
+
+    for(let row=0;row<ROWS;row++){
+      // Update row partials
+      for(let i=0;i<aN;i++) aRowPartials[i]=row*aKy[i]+t*aSpd[i]+aPh[i];
+      for(let i=0;i<cN;i++) cRowPartials[i]=row*cKy[i]+t*cSpd[i]+cPh[i];
+
+      for(let col=0;col<COLS;col++){
       const idx=row*COLS+col,cs=cellStates[idx];
       const bi=bannerGrid[idx];cs.bannerGlyph=bi;const inBZ=bi>=0;
 
-      cs.noiseVal+=(Math.random()-0.5)*0.14;cs.noiseVal*=0.96;
+      // Advance morph
+      cs.morphT=Math.min(1,cs.morphT+cs.morphSpeed);
+
+      // Only compute desired glyph when we actually need it (morph complete or first frame)
+      if(cs.morphT>=1){
+        cs.glyphA=cs.glyphB;
+
+        // Noise update — only when we need a new glyph pick
+        cs.noiseVal+=(Math.random()-0.5)*0.14;cs.noiseVal*=0.96;
+
+        let desired;
+        if(inBZ){
+          if(cs.flickerTimer>0){
+            // Compute pickBg using precomputed row partials
+            const pool=N_GLYPHS+userGlyphCount;
+            let v=0;for(let i=0;i<cN;i++)v+=Math.sin(col*cKx[i]+cRowPartials[i]);
+            v+=cs.noiseVal*0.4;
+            const raw=Math.floor(Math.abs((v+cN)/(cN*2)*pool*CHAR_CYCLES))%pool;
+            desired=raw<N_GLYPHS?raw:(userGlyphSlotBase+raw-N_GLYPHS);
+          } else {
+            cs.isBanner=true;desired=bi;
+          }
+        } else {
+          const pool=N_GLYPHS+userGlyphCount;
+          let v=0;for(let i=0;i<cN;i++)v+=Math.sin(col*cKx[i]+cRowPartials[i]);
+          v+=cs.noiseVal*0.4;
+          const raw=Math.floor(Math.abs((v+cN)/(cN*2)*pool*CHAR_CYCLES))%pool;
+          desired=raw<N_GLYPHS?raw:(userGlyphSlotBase+raw-N_GLYPHS);
+        }
+
+        if(desired!==cs.glyphB){cs.glyphB=desired;cs.morphT=0;}
+
+        // Flicker logic (only when morphT was >=1)
+        if(inBZ){
+          if(cs.flickerTimer>0){cs.flickerTimer--;if(cs.flickerTimer<=0)cs.isBanner=true;}
+          else if(Math.random()<0.0005&&bannerFlickering<banFlickerLimit){
+            cs.isBanner=false;cs.flickerTimer=1+Math.floor(Math.random()*6);bannerFlickering++;}
+        }
+      }
 
       // Count flickering
       if(inBZ && !(cs.glyphA===bi && cs.glyphB===bi && cs.morphT>=1)){
         bannerFlickering++;
       }
 
-      let desired;
-      if(inBZ){desired=cs.flickerTimer>0?pickBg(col,row,cs.noiseVal,t):(cs.isBanner=true,bi);}
-      else desired=pickBg(col,row,cs.noiseVal,t);
-
-      cs.morphT=Math.min(1,cs.morphT+cs.morphSpeed);
-      if(cs.morphT>=1){cs.glyphA=cs.glyphB;if(desired!==cs.glyphB){cs.glyphB=desired;cs.morphT=0;}}
-
-      if(inBZ&&cs.morphT>=1){cs.glyphA=cs.glyphB;
-        if(cs.flickerTimer>0){cs.flickerTimer--;if(cs.flickerTimer<=0)cs.isBanner=true;}
-        else if(Math.random()<0.0005&&bannerFlickering<banFlickerLimit){
-          cs.isBanner=false;cs.flickerTimer=1+Math.floor(Math.random()*6);bannerFlickering++;}}
-
-      let aR=0;for(let i=0;i<aN;i++)aR+=Math.sin(col*aKx[i]+row*aKy[i]+t*aSpd[i]+aPh[i]);
+      // Alpha — use precomputed row partials
+      let aR=0;for(let i=0;i<aN;i++)aR+=Math.sin(col*aKx[i]+aRowPartials[i]);
       const frac=(((aR+aN)/(aN*2)*ALPHA_CYCLES%1)+1)%1;
       const sinF=Math.sin(frac*π2);
       const alpha=inBZ?Math.max(0.08+0.82*sinF,0.85):0.08+0.78*sinF;
 
       const lb=cs.landPulse*baseHW*3;cs.landPulse*=0.88;if(cs.landPulse<0.01)cs.landPulse=0;
 
-      // Stroke width + banner sizing weight (computed together, one set of comparisons)
       const aIsBan=cs.glyphA===bi;
       const bIsBan=cs.glyphB===bi;
       let hw, bsw;
