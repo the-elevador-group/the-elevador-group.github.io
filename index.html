@@ -29,8 +29,6 @@ canvas { display: block; width: 100vw; height: 100vh; touch-action: none; opacit
 })();
 </script>
 <script>
-// Let browser paint the loader before executing heavy JS
-requestAnimationFrame(()=>{
 // ─────────────────────────────────────────────────────────────────────────────
 // GLYPH DEFINITIONS
 // Each glyph is a list of strokes. Each stroke is a polyline of [x,y] in 0..1.
@@ -542,11 +540,6 @@ function subdivideLetterStroke(stroke) {
   return result;
 }
 
-// Apply subdivision to all letter definitions
-for (let li = 0; li < LETTERS_DEF.length; li++) {
-  LETTERS_DEF[li] = LETTERS_DEF[li].map(subdivideLetterStroke);
-}
-
 const N_LETTERS = LETTERS_DEF.length;
 const LETTER_KEYS = ['T','H','E','L','V','A','D','O','R','G','U','P'];
 const PHRASE = 'THE ELEVADOR GROUP';
@@ -638,21 +631,24 @@ function rasterizeLetterCells(letterDef,lCols,lRows){
 const BANNER_LETTERS={};
 LETTER_KEYS.forEach((ch,i)=>{BANNER_LETTERS[ch]=LETTERS_DEF[i];});
 
-const GLYPH_VERTS=GLYPHS_DEF.map(buildGlyphVerts);
-const FULL_LETTER_VERTS=LETTERS_DEF.map(buildGlyphVerts);
+// These are computed lazily in main() to avoid blocking initial paint
+let GLYPH_VERTS, FULL_LETTER_VERTS, GLYPH_ASPECTS, LETTER_ASPECTS;
+let glyphStrokeCounts, baselineStrokes;
 
-// Per-glyph aspect ratio (w/h) for "contain" fitting into cells
-const GLYPH_ASPECTS=GLYPH_VERTS.map(computeGlyphAspect);
-// Letters and crop glyphs always fill their cell (aspect=1.0 as placeholder)
-const LETTER_ASPECTS=FULL_LETTER_VERTS.map(()=>1.0);
-
-// Track stroke count per glyph slot for alpha correction (overplotting)
-// More strokes → more overlapping lines → appears brighter → need lower alpha
-const glyphStrokeCounts = new Array(N_GLYPHS + N_LETTERS + 500).fill(MAX_STROKES);
-for (let g = 0; g < N_GLYPHS; g++) glyphStrokeCounts[g] = GLYPHS_DEF[g].length;
-for (let l = 0; l < N_LETTERS; l++) glyphStrokeCounts[N_GLYPHS+l] = LETTERS_DEF[l].length;
-// Baseline: average stroke count of the built-in hieroglyphs
-const baselineStrokes = GLYPHS_DEF.reduce((s,g)=>s+g.length,0) / N_GLYPHS;
+function computeGlyphData(){
+  // Apply subdivision to all letter definitions
+  for (let li = 0; li < LETTERS_DEF.length; li++) {
+    LETTERS_DEF[li] = LETTERS_DEF[li].map(subdivideLetterStroke);
+  }
+  GLYPH_VERTS=GLYPHS_DEF.map(buildGlyphVerts);
+  FULL_LETTER_VERTS=LETTERS_DEF.map(buildGlyphVerts);
+  GLYPH_ASPECTS=GLYPH_VERTS.map(computeGlyphAspect);
+  LETTER_ASPECTS=FULL_LETTER_VERTS.map(()=>1.0);
+  glyphStrokeCounts = new Array(N_GLYPHS + N_LETTERS + 500).fill(MAX_STROKES);
+  for (let g = 0; g < N_GLYPHS; g++) glyphStrokeCounts[g] = GLYPHS_DEF[g].length;
+  for (let l = 0; l < N_LETTERS; l++) glyphStrokeCounts[N_GLYPHS+l] = LETTERS_DEF[l].length;
+  baselineStrokes = GLYPHS_DEF.reduce((s,g)=>s+g.length,0) / N_GLYPHS;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Build crop glyphs for a given LETTER_COLS/ROWS. Returns {cropMap, cropVerts, N_TOTAL, ...}
@@ -751,21 +747,27 @@ async function main(){
   progress(10);
   await yieldFrame();
 
+  // Compute glyph vertex data (heavy work, deferred from parse time)
+  computeGlyphData();
+
+  progress(20);
+  await yieldFrame();
+
   const cv=document.getElementById('cv');
   if(!navigator.gpu){fallback('WebGPU not supported.');return;}
 
-  progress(20);
+  progress(25);
   await yieldFrame();
 
   const adapter=await navigator.gpu.requestAdapter();
   if(!adapter){fallback('No adapter.');return;}
 
-  progress(35);
+  progress(40);
   await yieldFrame();
 
   const device=await adapter.requestDevice();
 
-  progress(50);
+  progress(55);
   await yieldFrame();
 
   const ctx=cv.getContext('webgpu');
@@ -1481,12 +1483,8 @@ fn toClip(px:vec2f)->vec2f{
         hw=bHW; bsw=1;
       } else if(!aIsBan&&!bIsBan){
         // Banner zone showing background glyph
-        if(introFactor>=1){
-          hw=banBgHW+lb; bsw=0;
-        } else {
-          hw=baseHW+lb + (banBgHW-baseHW)*introFactor;
-          bsw=0;
-        }
+        hw=baseHW+lb + (banBgHW-baseHW)*introFactor;
+        bsw=introFactor;
       } else if(aIsBan){
         hw=bHW+(banBgHW-bHW)*cs.morphT; bsw=1-cs.morphT;
       } else {
@@ -1896,7 +1894,6 @@ function fallback(msg){document.getElementById('err').style.display='block';
   document.getElementById('err').textContent=msg+' — WebGPU: Chrome/Edge 113+.';
   document.getElementById('cv').style.display='none';}
 main().catch(e=>fallback(e.message));
-});
 </script>
 </body>
 </html>
