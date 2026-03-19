@@ -742,8 +742,8 @@ async function main(){
 
   // Round-cap instanced lines: each instance = segment quad + round cap at each end
   // With max blend, overlapping caps at joints form perfect round joins
-  const CAP_SEGS = 4; // 4 triangles per semicircle cap for round joints/ends
-  const VERTS_PER_INST = 6 + CAP_SEGS * 3 * 2; // 30: quad + 2 four-tri caps
+  const CAP_SEGS = 2; // 2 triangles per semicircle — plenty at cell sizes
+  const VERTS_PER_INST = 6 + CAP_SEGS * 3 * 2; // 18: quad + 2 two-tri caps
 
   function buildWGSL(){return `
 struct Uniforms{cols:u32,rows:u32,cellW:f32,cellH:f32,vpW:f32,vpH:f32,halfW:f32,scrollY:f32,zoom:f32,panX:f32,panY:f32,time:f32,};
@@ -838,20 +838,29 @@ fn toClip(px:vec2f)->vec2f{
       default:{px=px0; out.lineCoord=vec2f(0.0,0.0);}
     }
   } else {
-    // Round caps at both endpoints
+    // Round caps — only at stroke endpoints, skip for interior segments
     let capVi=vi-6u;
     let capEnd=capVi/(CAP_S*3u);  // 0 = cap at px0, 1 = cap at px1
+    
+    // Only emit cap at p0 for first segment of stroke (sgi==0)
+    // Only emit cap at p1 for last segment of stroke (sgi==sps-1)
+    let needCap=select(sgi==sps-1u, sgi==0u, capEnd==0u);
+    
+    if(!needCap || isGhost){
+      // Collapse to degenerate point
+      out.pos=vec4f(toClip(px0),0.0,1.0);
+      return out;
+    }
+    
     let fanVi=capVi%(CAP_S*3u);
     let triIdx=fanVi/3u;
     let vertIdx=fanVi%3u;
 
     let center=select(px0,px1,capEnd==1u);
     let capHW=select(hw0,hw1,capEnd==1u);
-    // Cap direction: at px0 we face backwards (-ndir), at px1 we face forwards (+ndir)
     let capDir=select(-ndir,ndir,capEnd==1u);
     let capPerp=vec2f(-capDir.y,capDir.x);
 
-    // Fan from perp to -perp (semicircle on the cap side)
     let a0=PI*f32(triIdx)/f32(CAP_S);
     let a1=PI*f32(triIdx+1u)/f32(CAP_S);
 
@@ -860,11 +869,9 @@ fn toClip(px:vec2f)->vec2f{
       out.lineCoord=vec2f(0.0,0.0);
     } else {
       let ang=select(a0,a1,vertIdx==2u);
-      let localX=cos(ang);  // along capPerp (width)
-      let localY=sin(ang);  // along capDir (outward from segment)
+      let localX=cos(ang);
+      let localY=sin(ang);
       px=center+capPerp*localX*capHW+capDir*localY*capHW;
-      // lineCoord: x = signed cap distance (0 at body, ±1 at tip)
-      //            y = signed lateral distance (-1 to 1 at edges)
       let capSign=select(-1.0,1.0,capEnd==1u);
       out.lineCoord=vec2f(localY*capSign,localX);
     }
@@ -876,7 +883,6 @@ fn toClip(px:vec2f)->vec2f{
 @fragment fn fs(in:VSOut)->@location(0) vec4f{
   let d=length(in.lineCoord);
   let aa=1.0-smoothstep(0.55,1.0,d);
-  if(aa<0.005){discard;}
   let a=in.alpha*aa;
   let col=mix(vec3f(0.72,0.70,0.82),vec3f(1.0,0.98,0.94),in.color);
   return vec4f(col*a,a);}
