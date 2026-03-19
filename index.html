@@ -971,6 +971,9 @@ fn toClip(px:vec2f)->vec2f{
   for(let i=0;i<cN;i++){cKx[i]=charWaves[i].kx;cKy[i]=charWaves[i].ky;cSpd[i]=charWaves[i].speed;cPh[i]=charWaves[i].phase;}
   const SCROLL_SPEED=0.3;
   let scrollAccum=0, scrollRowInt=0;
+  // Pre-allocated wave partial buffers (reused every frame)
+  const _aRP=new Float64Array(aN), _cRP=new Float64Array(cN);
+  const _aTimeP=new Float64Array(aN), _cTimeP=new Float64Array(cN);
 
   // ── Zoom / Pan ──
   let zoomLevel=1.0, panX=0.0, panY=0.0;
@@ -1269,45 +1272,53 @@ fn toClip(px:vec2f)->vec2f{
     const banFlickerLimit=bannerTotal*0.10;
     const STRIDE6=CELL_STRIDE/4;
 
-    // Precompute per-row partial sums for alpha waves: row*ky + t*speed + phase
-    // Then per-cell we only add col*kx and call sin
-    const aRowPartials=new Float64Array(aN);
-    const cRowPartials=new Float64Array(cN);
+    // Viewport culling: compute visible row/col range when zoomed
+    // Shader: clipX = (px/vpW*2-1)*zoom + panX. Visible when clipX in [-1,1].
+    // px = (col+0.5)*cellW. Solve for col:
+    // -1 <= ((col+0.5)*cellW/W*2-1)*zoom + panX <= 1
+    // col+0.5 >= W/(2*cellW) * ((-1-panX)/zoom + 1)
+    // col+0.5 <= W/(2*cellW) * ((1-panX)/zoom + 1)
+    const wDiv2cw = W/(2*CELL_W);
+    const hDiv2ch = H/(2*CELL_H);
+    const izoom = 1/zoomLevel;
+    const visColMin = Math.max(0, Math.floor(wDiv2cw * ((-1-panX)*izoom + 1) - 0.5) - 1);
+    const visColMax = Math.min(COLS-1, Math.ceil(wDiv2cw * ((1-panX)*izoom + 1) - 0.5) + 1);
+    // clipY = (1-py/vpH*2)*zoom + panY. py = (row+0.5)*cellH.
+    // -1 <= (1-(row+0.5)*cellH/H*2)*zoom + panY <= 1
+    // (row+0.5)*cellH/H*2 >= 1 - (1-panY)/zoom
+    // (row+0.5)*cellH/H*2 <= 1 - (-1-panY)/zoom
+    const visRowMin = Math.max(0, Math.floor(hDiv2ch * (1 - (1-panY)*izoom) - 0.5) - 1);
+    const visRowMax = Math.min(ROWS-1, Math.ceil(hDiv2ch * (1 - (-1-panY)*izoom) - 0.5) + 1);
+
+    // Precompute time-dependent partials once per frame
+    for(let i=0;i<aN;i++) _aTimeP[i]=t*aSpd[i]+aPh[i];
+    for(let i=0;i<cN;i++) _cTimeP[i]=t*cSpd[i]+cPh[i];
 
     for(let row=0;row<ROWS;row++){
       // Update row partials
-      for(let i=0;i<aN;i++) aRowPartials[i]=row*aKy[i]+t*aSpd[i]+aPh[i];
-      for(let i=0;i<cN;i++) cRowPartials[i]=row*cKy[i]+t*cSpd[i]+cPh[i];
+      for(let i=0;i<aN;i++) _aRP[i]=row*aKy[i]+_aTimeP[i];
+      for(let i=0;i<cN;i++) _cRP[i]=row*cKy[i]+_cTimeP[i];
 
+      const rowVis=row>=visRowMin&&row<=visRowMax;
+      const rowBase=row*COLS;
       for(let col=0;col<COLS;col++){
-      const idx=row*COLS+col,cs=cellStates[idx];
+      const idx=rowBase+col,cs=cellStates[idx];
       const bi=bannerGrid[idx];cs.bannerGlyph=bi;const inBZ=bi>=0;
 
       // Advance morph
-      cs.morphT=Math.min(1,cs.morphT+cs.morphSpeed);
+      const newMT=cs.morphT+cs.morphSpeed;
+      cs.morphT=newMT>=1?1:newMT;
 
-      // Only compute desired glyph when we actually need it (morph complete or first frame)
       if(cs.morphT>=1){
         cs.glyphA=cs.glyphB;
-
-        // Noise update — only when we need a new glyph pick
         cs.noiseVal+=(Math.random()-0.5)*0.14;cs.noiseVal*=0.96;
 
         let desired;
-        if(inBZ){
-          if(cs.flickerTimer>0){
-            // Compute pickBg using precomputed row partials
-            const pool=N_GLYPHS+userGlyphCount;
-            let v=0;for(let i=0;i<cN;i++)v+=Math.sin(col*cKx[i]+cRowPartials[i]);
-            v+=cs.noiseVal*0.4;
-            const raw=Math.floor(Math.abs((v+cN)/(cN*2)*pool*CHAR_CYCLES))%pool;
-            desired=raw<N_GLYPHS?raw:(userGlyphSlotBase+raw-N_GLYPHS);
-          } else {
-            cs.isBanner=true;desired=bi;
-          }
+        if(inBZ&&cs.flickerTimer<=0){
+          cs.isBanner=true;desired=bi;
         } else {
           const pool=N_GLYPHS+userGlyphCount;
-          let v=0;for(let i=0;i<cN;i++)v+=Math.sin(col*cKx[i]+cRowPartials[i]);
+          let v=0;for(let i=0;i<cN;i++)v+=Math.sin(col*cKx[i]+_cRP[i]);
           v+=cs.noiseVal*0.4;
           const raw=Math.floor(Math.abs((v+cN)/(cN*2)*pool*CHAR_CYCLES))%pool;
           desired=raw<N_GLYPHS?raw:(userGlyphSlotBase+raw-N_GLYPHS);
@@ -1315,7 +1326,6 @@ fn toClip(px:vec2f)->vec2f{
 
         if(desired!==cs.glyphB){cs.glyphB=desired;cs.morphT=0;}
 
-        // Flicker logic (only when morphT was >=1)
         if(inBZ){
           if(cs.flickerTimer>0){cs.flickerTimer--;if(cs.flickerTimer<=0)cs.isBanner=true;}
           else if(Math.random()<0.0005&&bannerFlickering<banFlickerLimit){
@@ -1323,18 +1333,32 @@ fn toClip(px:vec2f)->vec2f{
         }
       }
 
-      // Count flickering
       if(inBZ && !(cs.glyphA===bi && cs.glyphB===bi && cs.morphT>=1)){
         bannerFlickering++;
       }
 
-      // Alpha — use precomputed row partials
-      let aR=0;for(let i=0;i<aN;i++)aR+=Math.sin(col*aKx[i]+aRowPartials[i]);
-      const frac=(((aR+aN)/(aN*2)*ALPHA_CYCLES%1)+1)%1;
-      const sinF=Math.sin(frac*π2);
-      const alpha=inBZ?Math.max(0.08+0.82*sinF,0.85):0.08+0.78*sinF;
+      // For off-screen cells: still update state but write zero hw to skip GPU work
+      const off=idx*STRIDE6;
+      if(!rowVis||col<visColMin||col>visColMax){
+        cellF32[off]=cs.morphT;cellF32[off+1]=0;
+        cellU32[off+2]=cs.glyphA;cellU32[off+3]=cs.glyphB;
+        cellF32[off+4]=0;cellF32[off+5]=0; // hw=0 collapses all geometry
+        continue;
+      }
 
-      const lb=cs.landPulse*baseHW*3;cs.landPulse*=0.88;if(cs.landPulse<0.01)cs.landPulse=0;
+      // Alpha — banner cells are clamped to >=0.85 anyway, skip wave computation
+      let alpha;
+      if(inBZ&&cs.glyphA===bi&&cs.glyphB===bi&&cs.morphT>=1){
+        alpha=0.85; // steady banner: use constant alpha, skip sin calls
+      } else {
+        let aR=0;for(let i=0;i<aN;i++)aR+=Math.sin(col*aKx[i]+_aRP[i]);
+        const frac=(((aR+aN)/(aN*2)*ALPHA_CYCLES%1)+1)%1;
+        const sinF=Math.sin(frac*π2);
+        alpha=inBZ?Math.max(0.08+0.82*sinF,0.85):0.08+0.78*sinF;
+      }
+
+      let lb=0;
+      if(cs.landPulse>0){lb=cs.landPulse*baseHW*3;cs.landPulse*=0.88;if(cs.landPulse<0.01)cs.landPulse=0;}
 
       const aIsBan=cs.glyphA===bi;
       const bIsBan=cs.glyphB===bi;
@@ -1351,7 +1375,6 @@ fn toClip(px:vec2f)->vec2f{
         hw=banBgHW+(bHW-banBgHW)*cs.morphT; bsw=cs.morphT;
       }
 
-      const off=idx*STRIDE6;
       cellF32[off]=cs.morphT;cellF32[off+1]=alpha;
       cellU32[off+2]=cs.glyphA;cellU32[off+3]=cs.glyphB;
       cellF32[off+4]=hw;cellF32[off+5]=bsw+(inBZ?2.0:0.0);
@@ -1381,11 +1404,11 @@ fn toClip(px:vec2f)->vec2f{
     return{x:(e.touches?e.touches[0].clientX:e.clientX)-r.left,
            y:(e.touches?e.touches[0].clientY:e.clientY)-r.top};}
   function clampPan(){
-    // Clamp so you can't pan outside the grid. In clip space, the grid spans [-1,1].
-    // After zoom, visible range is [-1/z, 1/z]. Pan shifts this.
-    // We need: -1 <= -1/z + pan <= ... and 1/z + pan <= 1
-    // So: pan >= -1 + 1/z and pan <= 1 - 1/z
-    const maxP=Math.max(0, 1-1/zoomLevel);
+    // Don't allow panning so far that empty space appears.
+    // Left viewport edge (clip=-1) must map to grid px >= 0: panX <= zoom - 1
+    // Right viewport edge (clip=1) must map to grid px <= vpW: panX >= 1 - zoom
+    // Same for Y axis.
+    const maxP=Math.max(0, zoomLevel-1);
     panX=Math.max(-maxP, Math.min(maxP, panX));
     panY=Math.max(-maxP, Math.min(maxP, panY));
   }
