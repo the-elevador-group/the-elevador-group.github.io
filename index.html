@@ -1433,11 +1433,14 @@ fn toClip(px:vec2f)->vec2f{
   }
 
   let panning=false, panStartX=0, panStartY=0, panStartPanX=0, panStartPanY=0;
+  let gestureMode='undecided'; // 'undecided' | 'pan' | 'zoom'
+  let gestureMoveCount=0;
 
   function startDraw(e){
     if(e.touches&&e.touches.length>=2){
       e.preventDefault();
       pinching=true;drawing=false;panning=false;justPinched=true;
+      gestureMode='undecided';gestureMoveCount=0;
       pinchDist0=getTouchDist(e);pinchZoom0=zoomLevel;
       const mid=getTouchMid(e);pinchMidX=mid[0];pinchMidY=mid[1];
       pinchPanX0=panX;pinchPanY0=panY;
@@ -1457,7 +1460,6 @@ fn toClip(px:vec2f)->vec2f{
     if(panning){
       e.preventDefault();
       const dx=e.clientX-panStartX, dy=e.clientY-panStartY;
-      // Screen pixel delta → pan delta (panX shift of dp moves screen by dp*vpW/2 pixels)
       panX=panStartPanX + dx*2/window.innerWidth;
       panY=panStartPanY - dy*2/window.innerHeight;
       clampPan();
@@ -1468,14 +1470,38 @@ fn toClip(px:vec2f)->vec2f{
       const dist=getTouchDist(e);
       const mid=getTouchMid(e);
       const dx=mid[0]-pinchMidX, dy=mid[1]-pinchMidY;
-      const newZoom=Math.max(MIN_ZOOM,Math.min(MAX_ZOOM,pinchZoom0*dist/pinchDist0));
-      
-      const clipMidX0=(pinchMidX/window.innerWidth)*2-1;
-      const clipMidY0=-((pinchMidY/window.innerHeight)*2-1);
-      panX=pinchPanX0 + dx*2/window.innerWidth + clipMidX0*(pinchZoom0-newZoom);
-      panY=pinchPanY0 - dy*2/window.innerHeight + clipMidY0*(pinchZoom0-newZoom);
-      zoomLevel=newZoom;
-      clampPan();
+
+      // Decide gesture mode after a few samples
+      if(gestureMode==='undecided'){
+        gestureMoveCount++;
+        if(gestureMoveCount>=3){
+          const distRatio=dist/pinchDist0;
+          // If finger distance changed by >8%, it's a zoom gesture
+          if(distRatio<0.92||distRatio>1.08){
+            gestureMode='zoom';
+          } else {
+            gestureMode='pan';
+          }
+        }
+        // During undecided phase, do nothing (wait for decision)
+        return;
+      }
+
+      if(gestureMode==='pan'){
+        // Pure pan — ignore distance changes
+        panX=pinchPanX0 + dx*2/window.innerWidth;
+        panY=pinchPanY0 - dy*2/window.innerHeight;
+        clampPan();
+      } else {
+        // Zoom + pan anchored to midpoint
+        const newZoom=Math.max(MIN_ZOOM,Math.min(MAX_ZOOM,pinchZoom0*dist/pinchDist0));
+        const clipMidX0=(pinchMidX/window.innerWidth)*2-1;
+        const clipMidY0=-((pinchMidY/window.innerHeight)*2-1);
+        panX=pinchPanX0 + dx*2/window.innerWidth + clipMidX0*(pinchZoom0-newZoom);
+        panY=pinchPanY0 - dy*2/window.innerHeight + clipMidY0*(pinchZoom0-newZoom);
+        zoomLevel=newZoom;
+        clampPan();
+      }
       return;
     }
     if(!drawing)return;e.preventDefault();
