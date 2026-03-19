@@ -887,6 +887,7 @@ fn toClip(px:vec2f)->vec2f{
   const uniformF=new Float32Array(uniformBuf_AB);
   const uniformU=new Uint32Array(uniformBuf_AB);
   let maxCells=0,cellBuf=null,cellData=null,cellView=null;
+  let cellF32=null, cellU32=null; // Typed array views over cellData
   let glyphBuf=null, aspectBuf=null, pipeline=null, bindGroup=null, msaaTexture=null;
   let curNTotal=0;
 
@@ -899,7 +900,8 @@ fn toClip(px:vec2f)->vec2f{
 
   function ensureCellBuf(n){if(n<=maxCells)return;if(cellBuf)cellBuf.destroy();maxCells=n;
     cellBuf=device.createBuffer({size:maxCells*CELL_STRIDE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
-    cellData=new ArrayBuffer(maxCells*CELL_STRIDE);cellView=new DataView(cellData);}
+    cellData=new ArrayBuffer(maxCells*CELL_STRIDE);cellView=new DataView(cellData);
+    cellF32=new Float32Array(cellData);cellU32=new Uint32Array(cellData);}
   function createMSAATexture(){if(msaaTexture)msaaTexture.destroy();
     msaaTexture=device.createTexture({size:[W,H],sampleCount:4,format:fmt,usage:GPUTextureUsage.RENDER_ATTACHMENT});}
 
@@ -962,6 +964,11 @@ fn toClip(px:vec2f)->vec2f{
 
   let prevCols=0,prevRows=0,t=0;
   const aN=alphaWaves.length,cN=charWaves.length;
+  // Pre-flatten wave parameters for hot loop (avoid object property access)
+  const aKx=new Float64Array(aN),aKy=new Float64Array(aN),aSpd=new Float64Array(aN),aPh=new Float64Array(aN);
+  for(let i=0;i<aN;i++){aKx[i]=alphaWaves[i].kx;aKy[i]=alphaWaves[i].ky;aSpd[i]=alphaWaves[i].speed;aPh[i]=alphaWaves[i].phase;}
+  const cKx=new Float64Array(cN),cKy=new Float64Array(cN),cSpd=new Float64Array(cN),cPh=new Float64Array(cN);
+  for(let i=0;i<cN;i++){cKx[i]=charWaves[i].kx;cKy[i]=charWaves[i].ky;cSpd[i]=charWaves[i].speed;cPh[i]=charWaves[i].phase;}
   const SCROLL_SPEED=0.3;
   let scrollAccum=0, scrollRowInt=0;
 
@@ -982,7 +989,7 @@ fn toClip(px:vec2f)->vec2f{
   function pickBg(col,row,noise,t_){
     const pool=N_GLYPHS+userGlyphCount;
     if(pool===0)return 0;
-    let v=0;for(const w of charWaves)v+=Math.sin(col*w.kx+row*w.ky+t_*w.speed+w.phase);
+    let v=0;for(let i=0;i<cN;i++)v+=Math.sin(col*cKx[i]+row*cKy[i]+t_*cSpd[i]+cPh[i]);
     v+=noise*0.4;
     const raw=Math.floor(Math.abs((v+cN)/(cN*2)*pool*CHAR_CYCLES))%pool;
     return raw<N_GLYPHS?raw:(userGlyphSlotBase+raw-N_GLYPHS);
@@ -1259,6 +1266,9 @@ fn toClip(px:vec2f)->vec2f{
     const bHW=baseHW*2.2+Math.sin(t*0.07)*baseHW*0.5;
     const banBgHW=baseHW*1.35+Math.sin(t*0.07)*baseHW*0.15;
     bannerFlickering=0;
+    const banFlickerLimit=bannerTotal*0.10;
+    const t016=t*0.016;
+    const STRIDE6=CELL_STRIDE/4; // stride in float32/uint32 units (24/4=6)
 
     for(let row=0;row<ROWS;row++){for(let col=0;col<COLS;col++){
       const idx=row*COLS+col,cs=cellStates[idx];
@@ -1266,11 +1276,12 @@ fn toClip(px:vec2f)->vec2f{
 
       cs.noiseVal+=(Math.random()-0.5)*0.14;cs.noiseVal*=0.96;
 
-      let desired;
-      // Count this cell as flickering if it's in banner zone but not fully showing banner
+      // Count flickering
       if(inBZ && !(cs.glyphA===bi && cs.glyphB===bi && cs.morphT>=1)){
         bannerFlickering++;
       }
+
+      let desired;
       if(inBZ){desired=cs.flickerTimer>0?pickBg(col,row,cs.noiseVal,t):(cs.isBanner=true,bi);}
       else desired=pickBg(col,row,cs.noiseVal,t);
 
@@ -1279,43 +1290,36 @@ fn toClip(px:vec2f)->vec2f{
 
       if(inBZ&&cs.morphT>=1){cs.glyphA=cs.glyphB;
         if(cs.flickerTimer>0){cs.flickerTimer--;if(cs.flickerTimer<=0)cs.isBanner=true;}
-        else if(Math.random()<0.0005&&bannerFlickering<bannerTotal*0.10){
+        else if(Math.random()<0.0005&&bannerFlickering<banFlickerLimit){
           cs.isBanner=false;cs.flickerTimer=1+Math.floor(Math.random()*6);bannerFlickering++;}}
 
-      let aR=0;for(const w of alphaWaves)aR+=Math.sin(col*w.kx+row*w.ky+t*w.speed+w.phase);
-      const aM=(aR+aN)/(aN*2)*ALPHA_CYCLES,frac=((aM%1)+1)%1;
-      const alpha=inBZ?Math.max(0.08+0.82*Math.sin(frac*π2),0.85):0.08+0.78*Math.sin(frac*π2);
+      let aR=0;for(let i=0;i<aN;i++)aR+=Math.sin(col*aKx[i]+row*aKy[i]+t*aSpd[i]+aPh[i]);
+      const frac=(((aR+aN)/(aN*2)*ALPHA_CYCLES%1)+1)%1;
+      const sinF=Math.sin(frac*π2);
+      const alpha=inBZ?Math.max(0.08+0.82*sinF,0.85):0.08+0.78*sinF;
 
       const lb=cs.landPulse*baseHW*3;cs.landPulse*=0.88;if(cs.landPulse<0.01)cs.landPulse=0;
-      const bgHW=baseHW+lb;
-      // Smooth stroke width based on morph progress toward/away from banner glyph
-      let hw;
+
+      // Stroke width + banner sizing weight (computed together, one set of comparisons)
+      const aIsBan=cs.glyphA===bi;
+      const bIsBan=cs.glyphB===bi;
+      let hw, bsw;
       if(!inBZ){
-        hw=bgHW;
+        hw=baseHW+lb; bsw=0;
+      } else if(aIsBan&&bIsBan){
+        hw=bHW; bsw=1;
+      } else if(!aIsBan&&!bIsBan){
+        hw=banBgHW; bsw=0;
+      } else if(aIsBan){
+        hw=bHW+(banBgHW-bHW)*cs.morphT; bsw=1-cs.morphT;
       } else {
-        // Determine how "banner" the current display is based on morphT and glyph targets
-        const aIsBan=cs.glyphA===bi;
-        const bIsBan=cs.glyphB===bi;
-        if(aIsBan&&bIsBan){ hw=bHW; }
-        else if(!aIsBan&&!bIsBan){ hw=banBgHW; }
-        else if(aIsBan&&!bIsBan){ hw=bHW+(banBgHW-bHW)*cs.morphT; }  // morphing away from banner
-        else { hw=banBgHW+(bHW-banBgHW)*cs.morphT; }  // morphing toward banner
-      }
-      // Banner sizing weight: smoothly interpolated 0-1 based on morphT and which glyph is banner
-      const aIsBanGlyph = cs.glyphA === bi;
-      const bIsBanGlyph = cs.glyphB === bi;
-      let banSizingWeight = 0;
-      if (inBZ) {
-        if (aIsBanGlyph && bIsBanGlyph) banSizingWeight = 1;
-        else if (!aIsBanGlyph && !bIsBanGlyph) banSizingWeight = 0;
-        else if (bIsBanGlyph) banSizingWeight = cs.morphT;
-        else banSizingWeight = 1 - cs.morphT;
+        hw=banBgHW+(bHW-banBgHW)*cs.morphT; bsw=cs.morphT;
       }
 
-      const off=idx*CELL_STRIDE;
-      cellView.setFloat32(off,cs.morphT,true);cellView.setFloat32(off+4,alpha,true);
-      cellView.setUint32(off+8,cs.glyphA,true);cellView.setUint32(off+12,cs.glyphB,true);
-      cellView.setFloat32(off+16,hw,true);cellView.setFloat32(off+20,banSizingWeight + (inBZ ? 2.0 : 0.0),true);
+      const off=idx*STRIDE6;
+      cellF32[off]=cs.morphT;cellF32[off+1]=alpha;
+      cellU32[off+2]=cs.glyphA;cellU32[off+3]=cs.glyphB;
+      cellF32[off+4]=hw;cellF32[off+5]=bsw+(inBZ?2.0:0.0);
     }}
 
     device.queue.writeBuffer(cellBuf,0,cellData,0,nCells*CELL_STRIDE);
