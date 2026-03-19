@@ -20,7 +20,16 @@ canvas { display: block; width: 100vw; height: 100vh; touch-action: none; opacit
 <div id="err" style="display:none"></div>
 <div id="loader"><div id="loaderBar"></div></div>
 <script>
-// Let the browser paint the black background + loader bar before executing heavy JS
+// Immediately start the loader bar animation before any heavy work
+(function(){
+  const loaderBar=document.getElementById('loaderBar');
+  let pct=0;
+  function tick(){pct+=(10-pct)*0.04;loaderBar.style.width=pct+'%';if(pct<9.5)requestAnimationFrame(tick);}
+  requestAnimationFrame(tick);
+})();
+</script>
+<script>
+// Let browser paint the loader before executing heavy JS
 requestAnimationFrame(()=>{
 // ─────────────────────────────────────────────────────────────────────────────
 // GLYPH DEFINITIONS
