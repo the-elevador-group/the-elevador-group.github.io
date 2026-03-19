@@ -1022,6 +1022,8 @@ fn toClip(px:vec2f)->vec2f{
     introBrighten:-1,introReveal:-1}));}
 
   let prevCols=0,prevRows=0,t=0;
+  let lastFrameTime=0;
+  const TARGET_FRAME_MS=1000/60; // cap at 60fps
   const aN=alphaWaves.length,cN=charWaves.length;
   // Pre-flatten wave parameters for hot loop (avoid object property access)
   const aKx=new Float64Array(aN),aKy=new Float64Array(aN),aSpd=new Float64Array(aN),aPh=new Float64Array(aN);
@@ -1298,7 +1300,11 @@ fn toClip(px:vec2f)->vec2f{
   }
 
   // ── Main frame loop ──
-  function frame(){
+  function frame(now){
+    requestAnimationFrame(frame);
+    // Cap at 60fps: skip frame if not enough time has elapsed
+    if(now-lastFrameTime<TARGET_FRAME_MS-1)return; // -1ms tolerance for timer jitter
+    lastFrameTime=now;
     t++;computeLayout();const nCells=COLS*ROWS;
     if(COLS!==prevCols||ROWS!==prevRows){
       prevCols=COLS;prevRows=ROWS;
@@ -1338,7 +1344,7 @@ fn toClip(px:vec2f)->vec2f{
       createMSAATexture();
       scrollAccum=0;
     }
-    if(!pipeline||!cellBuf){requestAnimationFrame(frame);return;}
+    if(!pipeline||!cellBuf){return;}
 
     // Write uniforms every frame (zoom/pan can change)
     uniformF[0]=COLS;uniformF[1]=ROWS;uniformF[2]=CELL_W;uniformF[3]=CELL_H;uniformF[4]=W;uniformF[5]=H;uniformF[6]=LINE_HALF_WIDTH*dpr;uniformF[7]=0;
@@ -1514,8 +1520,7 @@ fn toClip(px:vec2f)->vec2f{
       clearValue:{r:0.039,g:0.039,b:0.039,a:1},loadOp:'clear',storeOp:'discard'}]});
     pass.setPipeline(pipeline);pass.setBindGroup(0,bindGroup);
     pass.draw(VERTS_PER_INST,nCells*MAX_STROKES*(STROKE_PTS-1),0,0);
-    pass.end();device.queue.submit([enc.finish()]);
-    requestAnimationFrame(frame);}
+    pass.end();device.queue.submit([enc.finish()]);}
 
   // Do initial crop build + pipeline here with yields (not in first frame loop iteration)
   progress(70);
