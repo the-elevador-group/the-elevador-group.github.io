@@ -6,10 +6,10 @@
 <title>THE ELEVADOR GROUP</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { background: #0a0a0a; overflow: hidden; width: 100vw; height: 100vh; touch-action: none; }
+html, body { background: #0a0a0a; overflow: hidden; width: 100%; height: 100%; touch-action: none; position: fixed; }
 canvas { display: block; width: 100vw; height: 100vh; touch-action: none; opacity: 0; }
 #err { color: #f88; font-family: monospace; padding: 2rem; }
-#loader { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); width:120px; height:1px; background:rgba(184,181,172,0.3); z-index:10; }
+#loader { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); width:120px; height:1px; background:rgba(184,181,172,0.3); z-index:10; overflow:visible; }
 #loaderBar { height:100%; width:0%; background:rgb(255,252,240); }
 </style>
 </head>
@@ -805,8 +805,13 @@ fn toClip(px:vec2f)->vec2f{
   let vB0=gp(cell.glyphB,si,sgi);let vB1=gp(cell.glyphB,si,sgi+1u);
   let t=cell.morphT;let p0=vA0+t*(vB0-vA0);let p1=vA1+t*(vB1-vA1);
   let bwRaw=cell.banWeight;
-  let inBanZone=bwRaw>=1.5;  // 2.0 added when in banner zone
-  let bw=select(bwRaw,bwRaw-2.0,inBanZone);  // extract sizing weight 0-1
+  let inBanZone=bwRaw>=1.5;  // values >= 2.0 are in banner zone
+  // Packed as: bsw (0-1) + 2.0 + colorBlend (0-1) when in zone
+  // So bwRaw in zone is 2.0 to 4.0
+  // colorBlend = clamp(bwRaw - 2.0, 0, 1)  (the amount above 2.0, up to 1.0)
+  // bw = bwRaw - 2.0 - colorBlend = remainder after extracting colorBlend
+  let colorBlend=select(0.0, clamp(bwRaw-2.0, 0.0, 1.0), inBanZone);
+  let bw=select(bwRaw, bwRaw-2.0-colorBlend, inBanZone);
   let cx=f32(col)*uni.cellW;let cy=f32(row)*uni.cellH;
   var sx:f32;var sy:f32;var oxF:f32;var oyF:f32;
   // Compute both sizing modes and interpolate
@@ -852,7 +857,9 @@ fn toClip(px:vec2f)->vec2f{
 
   var out:VSOut;
   out.alpha=cell.alpha;
-  out.color=select(0.0,1.0,inBanZone);
+  // Smooth color blend: bw controls transition from lavender (0) to white (1)
+  // inBanZone adds the sizing/layout interpolation but color is always smooth via bw
+  out.color=colorBlend;
   out.lineCoord=vec2f(0.0,0.0);
 
   // Collapse ghost segments to a single degenerate point
@@ -1457,9 +1464,7 @@ fn toClip(px:vec2f)->vec2f{
       } else if(aIsBan&&bIsBan){
         hw=bHW; bsw=1;
       } else if(!aIsBan&&!bIsBan){
-        // Banner zone showing background glyph (flicker or pre-reveal)
-        // Post-intro: use banBgHW with no sizing weight (same as end of aIsBan morph)
-        // During intro: smoothly increase from bg toward banner style
+        // Banner zone showing background glyph
         if(introFactor>=1){
           hw=banBgHW+lb; bsw=0;
         } else {
@@ -1472,12 +1477,14 @@ fn toClip(px:vec2f)->vec2f{
         hw=banBgHW+(bHW-banBgHW)*cs.morphT; bsw=cs.morphT;
       }
 
-      // During intro: don't flag as banner zone until brightening starts
-      // This keeps the glyph color as lavender (background) instead of white
+      // Pack banWeight: bsw + 2.0 + colorFactor when in banner zone
+      // colorFactor controls lavender→white transition (0=lavender, 1=white)
+      // In steady state colorFactor=1 (always white in banner zone)
+      const colorFactor = introFactor;
       const useBanZoneFlag = inBZ && introFactor > 0;
       cellF32[off]=cs.morphT;cellF32[off+1]=alpha;
       cellU32[off+2]=cs.glyphA;cellU32[off+3]=cs.glyphB;
-      cellF32[off+4]=hw;cellF32[off+5]=bsw+(useBanZoneFlag?2.0:0.0);
+      cellF32[off+4]=hw;cellF32[off+5]=useBanZoneFlag ? bsw+2.0+colorFactor : bsw;
     }}
 
     device.queue.writeBuffer(cellBuf,0,cellData,0,nCells*CELL_STRIDE);
