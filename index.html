@@ -802,11 +802,11 @@ fn toClip(px:vec2f)->vec2f{
   // Use a gentle spatial field — low frequency waves across the glyph
   let sp0=p0.x*2.0+p0.y*2.0;
   let w0=sin(sp0*3.14159-uni.time*0.5+cellPhase)*0.5+0.5;
-  let mod0=mix(0.65,1.0,w0);
+  let mod0=mix(0.35,1.0,w0);
 
   let sp1=p1.x*2.0+p1.y*2.0;
   let w1=sin(sp1*3.14159-uni.time*0.5+cellPhase)*0.5+0.5;
-  let mod1=mix(0.65,1.0,w1);
+  let mod1=mix(0.35,1.0,w1);
 
   // Smoothly reduce modulation as banWeight increases (banner = constant width)
   let modDepth=1.0-bw;  // 1 for background, 0 for full banner
@@ -1006,46 +1006,136 @@ fn toClip(px:vec2f)->vec2f{
 
   // Shared variable-width ribbon drawing
   function drawRibbon(pts, baseW, fillStyle, phase, taper) {
-    if (pts.length < 3) return;
-    const lens = [0];
-    for (let i=1;i<pts.length;i++) {
+    const n = pts.length;
+    if (n < 3) return;
+    // Arc lengths
+    let totalLen = 0;
+    const lens = new Array(n);
+    lens[0] = 0;
+    for (let i=1;i<n;i++) {
       const dx=pts[i][0]-pts[i-1][0], dy=pts[i][1]-pts[i-1][1];
-      lens.push(lens[i-1]+Math.sqrt(dx*dx+dy*dy));
+      totalLen += Math.sqrt(dx*dx+dy*dy);
+      lens[i] = totalLen;
     }
-    const totalLen = lens[lens.length-1];
     if (totalLen < 0.5) return;
+    const invTotal = 1.0 / totalLen;
     const time = t * 0.016;
-    const left = [], right = [];
-    for (let i=0;i<pts.length;i++) {
+    const phaseVal = phase || 0;
+    const PI = Math.PI;
+    const PI2 = PI * 2;
+    // Build outline in single pass
+    const left = new Array(n);
+    const right = new Array(n);
+    let count = 0;
+    for (let i=0;i<n;i++) {
+      const px = pts[i][0], py = pts[i][1];
       let tx, ty;
-      if (i===0) { tx=pts[1][0]-pts[0][0]; ty=pts[1][1]-pts[0][1]; }
-      else if (i===pts.length-1) { tx=pts[i][0]-pts[i-1][0]; ty=pts[i][1]-pts[i-1][1]; }
+      if (i===0) { tx=pts[1][0]-px; ty=pts[1][1]-py; }
+      else if (i===n-1) { tx=px-pts[i-1][0]; ty=py-pts[i-1][1]; }
       else { tx=pts[i+1][0]-pts[i-1][0]; ty=pts[i+1][1]-pts[i-1][1]; }
       const tl = Math.sqrt(tx*tx+ty*ty);
       if (tl < 0.001) continue;
-      tx /= tl; ty /= tl;
-      const nx = -ty, ny = tx;
-      const frac = lens[i] / totalLen;
-      const taperMul = taper ? Math.sin(frac * Math.PI) : 1.0;
-      const wave = Math.sin(frac * Math.PI * 2 - time * 0.5 + (phase||0)) * 0.3 + 0.7;
+      const inv = 1.0/tl;
+      const nx = -ty*inv, ny = tx*inv;
+      const frac = lens[i] * invTotal;
+      const taperMul = taper ? Math.sin(frac * PI) : 1.0;
+      const wave = Math.sin(frac * PI2 - time * 0.5 + phaseVal) * 0.3 + 0.7;
       const w = baseW * taperMul * wave;
-      left.push([pts[i][0]+nx*w, pts[i][1]+ny*w]);
-      right.push([pts[i][0]-nx*w, pts[i][1]-ny*w]);
+      left[count] = [px+nx*w, py+ny*w];
+      right[count] = [px-nx*w, py-ny*w];
+      count++;
     }
-    if (left.length < 2) return;
+    if (count < 2) return;
     octx.fillStyle = fillStyle;
     octx.beginPath();
     octx.moveTo(left[0][0], left[0][1]);
-    for (let i=1;i<left.length;i++) octx.lineTo(left[i][0], left[i][1]);
-    for (let i=right.length-1;i>=0;i--) octx.lineTo(right[i][0], right[i][1]);
+    for (let i=1;i<count;i++) octx.lineTo(left[i][0], left[i][1]);
+    for (let i=count-1;i>=0;i--) octx.lineTo(right[i][0], right[i][1]);
     octx.closePath();
     octx.fill();
   }
 
-  // Shared: smooth points with Chaikin then draw as variable-width ribbon
+  // Precompute ribbon outline from glyph vertex buffer in normalized [0,1] space
+  // Returns {left:[[x,y],...], right:[[x,y],...]} or null if degenerate
+  function precomputeRibbon(verts, phase) {
+    // Collect all points in [0,1] glyph space
+    const n = verts.length / 2;
+    const raw = new Array(n);
+    for (let i=0;i<n;i++) raw[i] = [verts[i*2], verts[i*2+1]];
+
+    // Chaikin smooth (2 passes)
+    let pts = raw;
+    for (let pass=0;pass<2;pass++) {
+      const npts = [[...pts[0]]];
+      for (let i=0;i<pts.length-1;i++) {
+        const ax=pts[i][0],ay=pts[i][1],bx=pts[i+1][0],by=pts[i+1][1];
+        npts.push([ax*0.75+bx*0.25,ay*0.75+by*0.25]);
+        npts.push([ax*0.25+bx*0.75,ay*0.25+by*0.75]);
+      }
+      npts.push([...pts[pts.length-1]]);
+      pts = npts;
+    }
+
+    // Compute arc lengths
+    const pn = pts.length;
+    if (pn < 3) return null;
+    const lens = new Array(pn);
+    let totalLen = 0;
+    lens[0] = 0;
+    for (let i=1;i<pn;i++) {
+      const dx=pts[i][0]-pts[i-1][0],dy=pts[i][1]-pts[i-1][1];
+      totalLen += Math.sqrt(dx*dx+dy*dy);
+      lens[i] = totalLen;
+    }
+    if (totalLen < 0.001) return null;
+    const invTotal = 1/totalLen;
+    const PI = Math.PI, PI2 = PI*2;
+    const phaseVal = phase||0;
+    // Normalized width = 0.03 (matches sz*0.03 / sz)
+    const baseW = 0.03;
+
+    // Build left/right outlines in normalized space
+    const left = [], right = [], center = [];
+    for (let i=0;i<pn;i++) {
+      const px=pts[i][0],py=pts[i][1];
+      let tx,ty;
+      if(i===0){tx=pts[1][0]-px;ty=pts[1][1]-py;}
+      else if(i===pn-1){tx=px-pts[i-1][0];ty=py-pts[i-1][1];}
+      else{tx=pts[i+1][0]-pts[i-1][0];ty=pts[i+1][1]-pts[i-1][1];}
+      const tl=Math.sqrt(tx*tx+ty*ty);
+      if(tl<0.0001)continue;
+      const inv=1/tl;
+      const nx=-ty*inv,ny=tx*inv;
+      const frac=lens[i]*invTotal;
+      const taperMul=Math.sin(frac*PI);
+      // Bake a static wave pattern (time=0); the animated wave will be in drawRibbon
+      const wave=Math.sin(frac*PI2+phaseVal)*0.3+0.7;
+      const w=baseW*taperMul*wave;
+      left.push([px+nx*w,py+ny*w]);
+      right.push([px-nx*w,py-ny*w]);
+      center.push([px,py]);
+    }
+    if(left.length<2)return null;
+    return {left,right,center,lens:lens,totalLen,pn:left.length};
+  }
+
+  // Draw a precomputed ribbon, scaled and translated to screen position
+  // ribbon: from precomputeRibbon, hx/hy: top-left screen pos, sz: scale
+  function drawCachedRibbon(ribbon, hx, hy, sz, fillStyle) {
+    if(!ribbon)return;
+    const {left,right,pn}=ribbon;
+    octx.fillStyle=fillStyle;
+    octx.beginPath();
+    octx.moveTo(hx+left[0][0]*sz, hy+left[0][1]*sz);
+    for(let i=1;i<pn;i++) octx.lineTo(hx+left[i][0]*sz, hy+left[i][1]*sz);
+    for(let i=pn-1;i>=0;i--) octx.lineTo(hx+right[i][0]*sz, hy+right[i][1]*sz);
+    octx.closePath();
+    octx.fill();
+  }
+
+  // Shared: smooth points with Chaikin then draw as variable-width ribbon (used for live trace)
   function smoothAndDrawRibbon(rawPts, baseW, fillStyle, phase, taper) {
     let pts = rawPts;
-    // Chaikin subdivision (2 passes)
     for (let pass=0; pass<2; pass++) {
       const npts=[[...pts[0]]];
       for (let i=0; i<pts.length-1; i++) {
@@ -1125,10 +1215,7 @@ fn toClip(px:vec2f)->vec2f{
       const g=Math.round(252-ageFrac*71);
       const b=Math.round(240-ageFrac*68);
       const a=f.a*(1-ageFrac*0.3);
-      const sz=f.sz,hx=f.x-sz/2,hy=f.y-sz/2;
-      const pts=[];
-      for(let i=0;i<VERTS_PER_G;i++) pts.push([hx+f.v[i*2]*sz, hy+f.v[i*2+1]*sz]);
-      smoothAndDrawRibbon(pts, sz*0.03, 'rgba('+r+','+g+','+b+','+a.toFixed(2)+')', f.gi*2.399, true);
+      drawCachedRibbon(f.ribbon, f.x-f.sz/2, f.y-f.sz/2, f.sz, 'rgba('+r+','+g+','+b+','+a.toFixed(2)+')');
     }
     octx.restore();
   }
@@ -1266,7 +1353,7 @@ fn toClip(px:vec2f)->vec2f{
 
   // ── Pinch / zoom state ──
   let pinching=false, pinchDist0=0, pinchZoom0=1, pinchMidX=0, pinchMidY=0, pinchPanX0=0, pinchPanY0=0;
-  let singlePanning=false, panStartX=0, panStartY=0, panPanX0=0, panPanY0=0;
+  let singlePanning=false, panPanX0=0, panPanY0=0;
   let justPinched=false;
 
   function getTouchDist(e){
@@ -1279,36 +1366,48 @@ fn toClip(px:vec2f)->vec2f{
     return [(t[0].clientX+t[1].clientX)/2, (t[0].clientY+t[1].clientY)/2];
   }
 
+  let panning=false, panStartX=0, panStartY=0, panStartPanX=0, panStartPanY=0;
+
   function startDraw(e){
     if(e.touches&&e.touches.length>=2){
-      // Start pinch/pan
       e.preventDefault();
-      pinching=true;drawing=false;justPinched=true;
+      pinching=true;drawing=false;panning=false;justPinched=true;
       pinchDist0=getTouchDist(e);pinchZoom0=zoomLevel;
       const mid=getTouchMid(e);pinchMidX=mid[0];pinchMidY=mid[1];
       pinchPanX0=panX;pinchPanY0=panY;
       return;
     }
+    // Right-click or middle-click: pan
+    if(e.button===1||e.button===2){
+      e.preventDefault();panning=true;drawing=false;
+      panStartX=e.clientX;panStartY=e.clientY;
+      panStartPanX=panX;panStartPanY=panY;
+      return;
+    }
     // Single touch/mouse: always draw
-    e.preventDefault();drawing=true;pinching=false;drawPoints=[ptrPos(e)];
+    e.preventDefault();drawing=true;pinching=false;panning=false;drawPoints=[ptrPos(e)];
   }
   function moveDraw(e){
+    if(panning){
+      e.preventDefault();
+      const dx=e.clientX-panStartX, dy=e.clientY-panStartY;
+      // Screen pixel delta → pan delta (panX shift of dp moves screen by dp*vpW/2 pixels)
+      panX=panStartPanX + dx*2/window.innerWidth;
+      panY=panStartPanY - dy*2/window.innerHeight;
+      clampPan();
+      return;
+    }
     if(pinching&&e.touches&&e.touches.length>=2){
       e.preventDefault();
       const dist=getTouchDist(e);
-      const newZoom=Math.max(MIN_ZOOM,Math.min(MAX_ZOOM,pinchZoom0*dist/pinchDist0));
-      // Zoom toward pinch midpoint: adjust pan so the midpoint stays fixed
       const mid=getTouchMid(e);
-      // Convert midpoint to clip space (-1..1)
-      const clipX=(mid[0]/window.innerWidth)*2-1;
-      const clipY=-((mid[1]/window.innerHeight)*2-1);
-      // Pan adjustment: when zoom changes, the point under the fingers shifts
-      // We want: clipX*newZoom + newPanX = clipX*pinchZoom0 + pinchPanX0
-      // But also account for finger movement
+      const dx=mid[0]-pinchMidX, dy=mid[1]-pinchMidY;
+      const newZoom=Math.max(MIN_ZOOM,Math.min(MAX_ZOOM,pinchZoom0*dist/pinchDist0));
+      
       const clipMidX0=(pinchMidX/window.innerWidth)*2-1;
       const clipMidY0=-((pinchMidY/window.innerHeight)*2-1);
-      panX=pinchPanX0 + (clipX-clipMidX0)*newZoom + clipX*(pinchZoom0-newZoom);
-      panY=pinchPanY0 + (clipY-clipMidY0)*newZoom + clipY*(pinchZoom0-newZoom);
+      panX=pinchPanX0 + dx*2/window.innerWidth + clipMidX0*(pinchZoom0-newZoom);
+      panY=pinchPanY0 - dy*2/window.innerHeight + clipMidY0*(pinchZoom0-newZoom);
       zoomLevel=newZoom;
       clampPan();
       return;
@@ -1318,6 +1417,7 @@ fn toClip(px:vec2f)->vec2f{
     if(Math.abs(p.x-last.x)+Math.abs(p.y-last.y)>2)drawPoints.push(p);
   }
   function endDraw(e){
+    if(panning){e.preventDefault();panning=false;return;}
     if(pinching){e.preventDefault();pinching=false;return;}
     if(!drawing)return;e.preventDefault();drawing=false;
     octx.clearRect(0,0,overlay.width,overlay.height);
@@ -1376,16 +1476,18 @@ fn toClip(px:vec2f)->vec2f{
     const gridBcy=((bcy-halfH)/zoomLevel + panY*halfH/zoomLevel) + halfH;
     const gridSize=size/zoomLevel;
     const excl=new Set();
+    const ribbon=precomputeRibbon(nv, ri*2.399);
     for(let i=0;i<25;i++){
       const sx2=gridBcx+(Math.random()-0.5)*gridSize*0.4,sy2=gridBcy+(Math.random()-0.5)*gridSize*0.4;
       const tg=findTarget(ri,excl,sx2,sy2);excl.add(tg.row*COLS+tg.col);
       floaters.push({x:sx2,y:sy2,vx:(Math.random()-0.5)*2,vy:(Math.random()-0.5)*2,
-        tc:tg.col,tr:tg.row,v:nv,gi:ri,a:0.75,age:0,
+        tc:tg.col,tr:tg.row,ribbon:ribbon,gi:ri,a:0.75,age:0,
         sz:gridSize,esz:Math.min(CELL_W,CELL_H)/dpr*1.2});
     }
   }
   cv.addEventListener('mousedown',startDraw);cv.addEventListener('mousemove',moveDraw);
-  cv.addEventListener('mouseup',endDraw);cv.addEventListener('mouseleave',endDraw);
+  cv.addEventListener('mouseup',endDraw);cv.addEventListener('mouseleave',function(e){panning=false;endDraw(e);});
+  cv.addEventListener('contextmenu',function(e){e.preventDefault();});
   cv.addEventListener('touchstart',startDraw,{passive:false});
   cv.addEventListener('touchmove',moveDraw,{passive:false});
   cv.addEventListener('touchend',function(e){
@@ -1401,16 +1503,24 @@ fn toClip(px:vec2f)->vec2f{
     pinching=false;drawing=false;
   },{passive:false});
 
-  // Mouse wheel zoom (desktop)
+  // Wheel: trackpad scroll = pan, trackpad pinch (ctrlKey) or mouse wheel = zoom
   cv.addEventListener('wheel',function(e){
     e.preventDefault();
-    const clipX=(e.clientX/window.innerWidth)*2-1;
-    const clipY=-((e.clientY/window.innerHeight)*2-1);
-    const oldZoom=zoomLevel;
-    const factor=e.deltaY>0?0.9:1.1;
-    zoomLevel=Math.max(MIN_ZOOM,Math.min(MAX_ZOOM,zoomLevel*factor));
-    panX=panX+clipX*(oldZoom-zoomLevel);
-    panY=panY+clipY*(oldZoom-zoomLevel);
+    if(e.ctrlKey){
+      // Pinch-to-zoom gesture (trackpad) or Ctrl+wheel
+      const clipX=(e.clientX/window.innerWidth)*2-1;
+      const clipY=-((e.clientY/window.innerHeight)*2-1);
+      const oldZoom=zoomLevel;
+      // deltaY is negative for zoom-in on trackpad pinch
+      const factor=Math.exp(-e.deltaY*0.01);
+      zoomLevel=Math.max(MIN_ZOOM,Math.min(MAX_ZOOM,zoomLevel*factor));
+      panX=panX+clipX*(oldZoom-zoomLevel);
+      panY=panY+clipY*(oldZoom-zoomLevel);
+    } else {
+      // Two-finger scroll = pan (screen-solidary)
+      panX-=e.deltaX*2/window.innerWidth;
+      panY+=e.deltaY*2/window.innerHeight;
+    }
     clampPan();
   },{passive:false});
 
