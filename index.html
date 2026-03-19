@@ -1738,20 +1738,29 @@ fn toClip(px:vec2f)->vec2f{
       const mid=getTouchMid(e);
       const dx=mid[0]-pinchMidX, dy=mid[1]-pinchMidY;
 
-      // Decide gesture mode after a few samples
+      // Decide gesture mode — continuously re-evaluate until locked
       if(gestureMode==='undecided'){
         gestureMoveCount++;
-        if(gestureMoveCount>=3){
-          const distRatio=dist/pinchDist0;
-          // If finger distance changed by >8%, it's a zoom gesture
-          if(distRatio<0.92||distRatio>1.08){
-            gestureMode='zoom';
-          } else {
-            gestureMode='pan';
-          }
+        const distRatio=dist/pinchDist0;
+        const midDist=Math.sqrt(dx*dx+dy*dy);
+        // Zoom if finger distance changed by >4%
+        if(distRatio<0.96||distRatio>1.04){
+          gestureMode='zoom';
+        } else if(gestureMoveCount>=5 && midDist>15){
+          // After 5 samples, if fingers moved >15px together but distance barely changed → pan
+          gestureMode='pan';
         }
-        // During undecided phase, do nothing (wait for decision)
-        return;
+        if(gestureMode==='undecided'){
+          // During undecided: apply both tentatively (zoom+pan)
+          const newZoom=Math.max(MIN_ZOOM,Math.min(MAX_ZOOM,pinchZoom0*distRatio));
+          const clipMidX0=(pinchMidX/window.innerWidth)*2-1;
+          const clipMidY0=-((pinchMidY/window.innerHeight)*2-1);
+          panX=pinchPanX0 + dx*2/window.innerWidth + clipMidX0*(pinchZoom0-newZoom);
+          panY=pinchPanY0 - dy*2/window.innerHeight + clipMidY0*(pinchZoom0-newZoom);
+          zoomLevel=newZoom;
+          clampPan();
+          return;
+        }
       }
 
       if(gestureMode==='pan'){
