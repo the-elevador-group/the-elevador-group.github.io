@@ -819,13 +819,12 @@ fn toClip(px:vec2f)->vec2f{
   let vB0=gp(cell.glyphB,si,sgi);let vB1=gp(cell.glyphB,si,sgi+1u);
   let t=cell.morphT;let p0=vA0+t*(vB0-vA0);let p1=vA1+t*(vB1-vA1);
   let bwRaw=cell.banWeight;
-  let inBanZone=bwRaw>=1.5;  // values >= 2.0 are in banner zone
-  // Packed as: bsw (0-1) + 2.0 + colorBlend (0-1) when in zone
-  // So bwRaw in zone is 2.0 to 4.0
-  // colorBlend = clamp(bwRaw - 2.0, 0, 1)  (the amount above 2.0, up to 1.0)
-  // bw = bwRaw - 2.0 - colorBlend = remainder after extracting colorBlend
-  let colorBlend=select(0.0, clamp(bwRaw-2.0, 0.0, 1.0), inBanZone);
-  let bw=select(bwRaw, bwRaw-2.0-colorBlend, inBanZone);
+  let inBanZone=bwRaw>=1.5;
+  // Packed as: 2.0 + colorVal(0-1) + bsw(sizing 0-1)
+  // Extract: raw = bwRaw - 2.0 (range 0..2), colorBlend = min(raw,1), bw = raw-colorBlend
+  let rawBW=select(0.0, bwRaw-2.0, inBanZone);
+  let colorBlend=min(rawBW, 1.0);    // color weight (0=lavender, 1=white)
+  let bw=rawBW-colorBlend;           // sizing weight (0=contain, 1=fill cell)
   let cx=f32(col)*uni.cellW;let cy=f32(row)*uni.cellH;
   var sx:f32;var sy:f32;var oxF:f32;var oyF:f32;
   // Compute both sizing modes and interpolate
@@ -871,9 +870,7 @@ fn toClip(px:vec2f)->vec2f{
 
   var out:VSOut;
   out.alpha=cell.alpha;
-  // Smooth color blend: bw controls transition from lavender (0) to white (1)
-  // inBanZone adds the sizing/layout interpolation but color is always smooth via bw
-  out.color=colorBlend;
+  out.color=colorBlend;  // 0=lavender, 1=white
   out.lineCoord=vec2f(0.0,0.0);
 
   // Collapse ghost segments to a single degenerate point
@@ -1482,23 +1479,31 @@ fn toClip(px:vec2f)->vec2f{
       } else if(aIsBan&&bIsBan){
         hw=bHW; bsw=1;
       } else if(!aIsBan&&!bIsBan){
-        // Banner zone showing background glyph
+        // Both background in banner zone: sizing stays at 0 (preserve aspect ratio)
         hw=baseHW+lb + (banBgHW-baseHW)*introFactor;
-        bsw=introFactor;
-      } else if(aIsBan){
-        hw=bHW+(banBgHW-bHW)*cs.morphT; bsw=1-cs.morphT;
+        bsw=0;
+      } else if(aIsBan&&!bIsBan){
+        // Morphing FROM banner TO background: bsw goes 1→0
+        hw=bHW+(banBgHW-bHW)*cs.morphT;
+        bsw=1-cs.morphT;
       } else {
-        hw=banBgHW+(bHW-banBgHW)*cs.morphT; bsw=cs.morphT;
+        // Morphing FROM background TO banner: bsw goes 0→1
+        hw=banBgHW+(bHW-banBgHW)*cs.morphT;
+        bsw=cs.morphT;
       }
 
-      // Pack banWeight: bsw + 2.0 + colorFactor when in banner zone
-      // colorFactor controls lavender→white transition (0=lavender, 1=white)
-      // In steady state colorFactor=1 (always white in banner zone)
-      const colorFactor = introFactor;
-      const useBanZoneFlag = inBZ && introFactor > 0;
+      // Color: smooth lavender→white transition
+      // During intro: introFactor controls color (0=lavender, 1=white)
+      // Post-intro in banner zone: always white (1)
+      // During morph: max of introFactor and bsw (whichever is higher)
+      const colorVal = inBZ ? Math.max(introFactor, bsw) : 0;
+      const useBanZoneFlag = inBZ && colorVal > 0;
       cellF32[off]=cs.morphT;cellF32[off+1]=alpha;
       cellU32[off+2]=cs.glyphA;cellU32[off+3]=cs.glyphB;
-      cellF32[off+4]=hw;cellF32[off+5]=useBanZoneFlag ? bsw+2.0+colorFactor : bsw;
+      cellF32[off+4]=hw;
+      // Pack banWeight: 2.0 + colorVal(0-1) + bsw(0-1) = range 2.0..4.0
+      // Shader: raw=bwRaw-2.0, colorBlend=min(raw,1.0), bw=raw-colorBlend (sizing)
+      cellF32[off+5]=useBanZoneFlag ? 2.0+colorVal+bsw : 0;
     }}
 
     device.queue.writeBuffer(cellBuf,0,cellData,0,nCells*CELL_STRIDE);
