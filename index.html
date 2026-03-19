@@ -97,7 +97,7 @@ function buildGlyphVerts(strokes) {
   let totalArcLen = 0;
   
   for (const stroke of strokes) {
-    const dense = [];
+    let dense = [];
     for (const seg of stroke) {
       const s = S;
       if (seg.type === 'L') {
@@ -114,6 +114,7 @@ function buildGlyphVerts(strokes) {
       }
     }
     if (dense.length < 2) { strokeData.push({dense:[[0.5,0.5],[0.5,0.5]],lens:[0,0],arcLen:0}); continue; }
+
     const lens = [0];
     for (let i=1;i<dense.length;i++){
       const dx=dense[i][0]-dense[i-1][0],dy=dense[i][1]-dense[i-1][1];
@@ -450,6 +451,87 @@ const LETTERS_DEF = [
 ];
 const UNDERLINE_DEF = [[{type:'L',pts:[[0.1,0.5],[0.9,0.5]]}]];
 
+// Subdivide curved sections of letter strokes to add more control points
+// This keeps the exact original corner positions but adds intermediate points
+// along gentle curves using Chaikin subdivision (only between smooth junctions)
+function subdivideLetterStroke(stroke) {
+  const hasOnlyLines = stroke.every(s => s.type === 'L');
+  if (!hasOnlyLines || stroke.length < 3) return stroke;
+  
+  // Extract control points
+  const pts = [stroke[0].pts[0]];
+  for (const seg of stroke) pts.push(seg.pts[seg.pts.length - 1]);
+  
+  // Classify corners
+  function angleAt(i) {
+    if (i <= 0 || i >= pts.length - 1) return 0;
+    const ax = pts[i][0]-pts[i-1][0], ay = pts[i][1]-pts[i-1][1];
+    const bx = pts[i+1][0]-pts[i][0], by = pts[i+1][1]-pts[i][1];
+    const la = Math.sqrt(ax*ax+ay*ay), lb = Math.sqrt(bx*bx+by*by);
+    if (la < 0.001 || lb < 0.001) return 0;
+    return (ax*bx+ay*by)/(la*lb); // cosine of angle
+  }
+  
+  // Find runs of smooth points (cos > 0.3 = angle < ~72°)
+  // For each smooth run, apply Chaikin subdivision to add points
+  // Then rebuild as L-segments
+  const isSharp = pts.map((_, i) => i === 0 || i === pts.length-1 || angleAt(i) < 0.55);
+  
+  // Build refined point list
+  let refined = [];
+  let runStart = 0;
+  
+  while (runStart < pts.length) {
+    if (isSharp[runStart]) {
+      refined.push(pts[runStart]);
+      runStart++;
+      continue;
+    }
+    // Find the end of this smooth run
+    let runEnd = runStart;
+    while (runEnd < pts.length && !isSharp[runEnd]) runEnd++;
+    
+    // Include the sharp points on either side as anchors
+    const anchorStart = Math.max(0, runStart - 1);
+    const anchorEnd = Math.min(pts.length - 1, runEnd);
+    
+    // Extract the run including anchors
+    let run = pts.slice(anchorStart, anchorEnd + 1);
+    
+    // Chaikin subdivide this run 3 times, but pin the first and last points
+    for (let pass = 0; pass < 3; pass++) {
+      const next = [run[0]];
+      for (let i = 0; i < run.length - 1; i++) {
+        const [ax,ay] = run[i], [bx,by] = run[i+1];
+        next.push([ax*0.75+bx*0.25, ay*0.75+by*0.25]);
+        next.push([ax*0.25+bx*0.75, ay*0.25+by*0.75]);
+      }
+      next.push(run[run.length-1]);
+      run = next;
+    }
+    
+    // Add run points (skip first if it's already the last point added)
+    const startIdx = (refined.length > 0 && 
+      Math.abs(refined[refined.length-1][0]-run[0][0]) < 0.001 && 
+      Math.abs(refined[refined.length-1][1]-run[0][1]) < 0.001) ? 1 : 0;
+    for (let i = startIdx; i < run.length; i++) refined.push(run[i]);
+    
+    runStart = runEnd;
+  }
+  
+  // Rebuild as L-segments
+  const result = [];
+  for (let i = 0; i < refined.length - 1; i++) {
+    result.push({type:'L', pts:[refined[i], refined[i+1]]});
+  }
+  return result;
+}
+
+// Apply subdivision to all letter definitions
+for (let li = 0; li < LETTERS_DEF.length; li++) {
+  LETTERS_DEF[li] = LETTERS_DEF[li].map(subdivideLetterStroke);
+}
+
 const N_LETTERS = LETTERS_DEF.length;
 const LETTER_KEYS = ['T','H','E','L','V','A','D','O','R','G','U','P'];
 const PHRASE = 'THE ELEVADOR GROUP';
@@ -660,8 +742,8 @@ async function main(){
 
   // Round-cap instanced lines: each instance = segment quad + round cap at each end
   // With max blend, overlapping caps at joints form perfect round joins
-  const CAP_SEGS = 2; // two triangles per semicircle cap, good round join coverage
-  const VERTS_PER_INST = 6 + CAP_SEGS * 3 * 2; // 18: quad + 2 two-tri caps
+  const CAP_SEGS = 4; // 4 triangles per semicircle cap for round joints/ends
+  const VERTS_PER_INST = 6 + CAP_SEGS * 3 * 2; // 30: quad + 2 four-tri caps
 
   function buildWGSL(){return `
 struct Uniforms{cols:u32,rows:u32,cellW:f32,cellH:f32,vpW:f32,vpH:f32,halfW:f32,scrollY:f32,zoom:f32,panX:f32,panY:f32,time:f32,};
@@ -922,88 +1004,81 @@ fn toClip(px:vec2f)->vec2f{
     return{col:bc,row:br};
   }
 
+  // Shared variable-width ribbon drawing
+  function drawRibbon(pts, baseW, fillStyle, phase, taper) {
+    if (pts.length < 3) return;
+    const lens = [0];
+    for (let i=1;i<pts.length;i++) {
+      const dx=pts[i][0]-pts[i-1][0], dy=pts[i][1]-pts[i-1][1];
+      lens.push(lens[i-1]+Math.sqrt(dx*dx+dy*dy));
+    }
+    const totalLen = lens[lens.length-1];
+    if (totalLen < 0.5) return;
+    const time = t * 0.016;
+    const left = [], right = [];
+    for (let i=0;i<pts.length;i++) {
+      let tx, ty;
+      if (i===0) { tx=pts[1][0]-pts[0][0]; ty=pts[1][1]-pts[0][1]; }
+      else if (i===pts.length-1) { tx=pts[i][0]-pts[i-1][0]; ty=pts[i][1]-pts[i-1][1]; }
+      else { tx=pts[i+1][0]-pts[i-1][0]; ty=pts[i+1][1]-pts[i-1][1]; }
+      const tl = Math.sqrt(tx*tx+ty*ty);
+      if (tl < 0.001) continue;
+      tx /= tl; ty /= tl;
+      const nx = -ty, ny = tx;
+      const frac = lens[i] / totalLen;
+      const taperMul = taper ? Math.sin(frac * Math.PI) : 1.0;
+      const wave = Math.sin(frac * Math.PI * 2 - time * 0.5 + (phase||0)) * 0.3 + 0.7;
+      const w = baseW * taperMul * wave;
+      left.push([pts[i][0]+nx*w, pts[i][1]+ny*w]);
+      right.push([pts[i][0]-nx*w, pts[i][1]-ny*w]);
+    }
+    if (left.length < 2) return;
+    octx.fillStyle = fillStyle;
+    octx.beginPath();
+    octx.moveTo(left[0][0], left[0][1]);
+    for (let i=1;i<left.length;i++) octx.lineTo(left[i][0], left[i][1]);
+    for (let i=right.length-1;i>=0;i--) octx.lineTo(right[i][0], right[i][1]);
+    octx.closePath();
+    octx.fill();
+  }
+
+  // Shared: smooth points with Chaikin then draw as variable-width ribbon
+  function smoothAndDrawRibbon(rawPts, baseW, fillStyle, phase, taper) {
+    let pts = rawPts;
+    // Chaikin subdivision (2 passes)
+    for (let pass=0; pass<2; pass++) {
+      const npts=[[...pts[0]]];
+      for (let i=0; i<pts.length-1; i++) {
+        const ax=pts[i][0],ay=pts[i][1],bx=pts[i+1][0],by=pts[i+1][1];
+        npts.push([ax*0.75+bx*0.25,ay*0.75+by*0.25]);
+        npts.push([ax*0.25+bx*0.75,ay*0.25+by*0.75]);
+      }
+      npts.push([...pts[pts.length-1]]);
+      pts=npts;
+    }
+    drawRibbon(pts, baseW, fillStyle, phase, taper);
+  }
+
   function drawFloaters(nCells){
     octx.clearRect(0,0,overlay.width,overlay.height);
 
-    // Draw the live trace in screen space (no zoom transform — follows the finger)
+    // Draw the live trace in screen space
     if(drawing&&drawPoints.length>=2){
-      // Smooth the raw points with Chaikin subdivision (2 passes)
-      let pts=drawPoints.map(p=>[p.x,p.y]);
-      for(let pass=0;pass<2;pass++){
-        const npts=[[...pts[0]]];
-        for(let i=0;i<pts.length-1;i++){
-          const ax=pts[i][0],ay=pts[i][1],bx=pts[i+1][0],by=pts[i+1][1];
-          npts.push([ax*0.75+bx*0.25,ay*0.75+by*0.25]);
-          npts.push([ax*0.25+bx*0.75,ay*0.25+by*0.75]);
-        }
-        npts.push([...pts[pts.length-1]]);
-        pts=npts;
-      }
-
-      // Compute arc lengths for variable width
-      const lens=[0];
-      for(let i=1;i<pts.length;i++){
-        const dx=pts[i][0]-pts[i-1][0],dy=pts[i][1]-pts[i-1][1];
-        lens.push(lens[i-1]+Math.sqrt(dx*dx+dy*dy));
-      }
-      const totalLen=lens[lens.length-1];
-      if(totalLen>1&&pts.length>=3){
-        // Build left and right outlines with variable width
-        const leftPts=[],rightPts=[];
-        const baseW=2.0;
-        const time=t*0.016;
-        for(let i=0;i<pts.length;i++){
-          // Tangent direction
-          let tx,ty;
-          if(i===0){tx=pts[1][0]-pts[0][0];ty=pts[1][1]-pts[0][1];}
-          else if(i===pts.length-1){tx=pts[i][0]-pts[i-1][0];ty=pts[i][1]-pts[i-1][1];}
-          else{tx=pts[i+1][0]-pts[i-1][0];ty=pts[i+1][1]-pts[i-1][1];}
-          const tl=Math.sqrt(tx*tx+ty*ty);
-          if(tl<0.001)continue;
-          tx/=tl;ty/=tl;
-          const nx=-ty,ny=tx;
-
-          // Variable width: wave along arc length + taper at ends
-          const frac=totalLen>0?lens[i]/totalLen:0;
-          const taper=Math.sin(frac*Math.PI); // 0 at start/end, 1 at middle
-          const wave=Math.sin(frac*Math.PI*2-time*0.5)*0.3+0.7; // 0.4-1.0
-          const w=baseW*taper*wave;
-
-          leftPts.push([pts[i][0]+nx*w,pts[i][1]+ny*w]);
-          rightPts.push([pts[i][0]-nx*w,pts[i][1]-ny*w]);
-        }
-
-        // Draw as filled shape — solid white like banner letters
-        if(leftPts.length>=2){
-          octx.fillStyle='rgba(255,252,240,0.85)';
-          octx.beginPath();
-          octx.moveTo(leftPts[0][0],leftPts[0][1]);
-          for(let i=1;i<leftPts.length;i++)octx.lineTo(leftPts[i][0],leftPts[i][1]);
-          for(let i=rightPts.length-1;i>=0;i--)octx.lineTo(rightPts[i][0],rightPts[i][1]);
-          octx.closePath();
-          octx.fill();
-
-          // Thin bright center stroke for crisp definition
-          octx.strokeStyle='rgba(255,252,240,0.95)';
-          octx.lineWidth=0.8;octx.lineCap='round';octx.lineJoin='round';
-          octx.beginPath();
-          octx.moveTo(pts[0][0],pts[0][1]);
-          for(let i=1;i<pts.length;i++)octx.lineTo(pts[i][0],pts[i][1]);
-          octx.stroke();
-        }
-      }
+      smoothAndDrawRibbon(
+        drawPoints.map(p=>[p.x,p.y]),
+        LINE_HALF_WIDTH*dpr*2.2*zoomLevel,
+        'rgba(255,252,240,0.85)', 0, true
+      );
     }
 
     if(floaters.length===0)return;
 
-    // Apply zoom/pan transform for floaters (they live in grid coordinates)
     octx.save();
     const cx=overlay.width/2, cy=overlay.height/2;
     octx.translate(cx+panX*cx, cy-panY*cy);
     octx.scale(zoomLevel,zoomLevel);
     octx.translate(-cx,-cy);
 
-    // Build cell→glyph lookup
     if(!cgBuf||cgBuf.length<nCells)cgBuf=new Int32Array(nCells);
     for(let i=0;i<nCells&&i<cellStates.length;i++){
       const cs=cellStates[i];
@@ -1011,31 +1086,20 @@ fn toClip(px:vec2f)->vec2f{
     }
 
     const dead=[];
-
     for(let fi=0;fi<floaters.length;fi++){
       const f=floaters[fi];
       const tx=(f.tc+0.5)*CELL_W/dpr,ty=(f.tr+0.5)*CELL_H/dpr;
       const dx=tx-f.x,dy=ty-f.y,d=Math.sqrt(dx*dx+dy*dy);
-
-      // Increase attraction as floater gets closer — snappier landing
       const acc=d<30?0.25:0.15;
       if(d>0.5){f.vx+=dx/d*acc;f.vy+=dy/d*acc;}
       f.vx*=0.92;f.vy*=0.92;f.x+=f.vx;f.y+=f.vy;
       f.sz+=(f.esz-f.sz)*0.08;
       const spd2=f.vx*f.vx+f.vy*f.vy;
-
-      // Check if target cell currently shows our glyph
       const tci=f.tr*COLS+f.tc;
       const targetMatch=tci>=0&&tci<nCells&&cgBuf[tci]===f.gi;
-
-      // Land only if close, slow, and target cell shows our glyph
       if(d<8&&spd2<1.0&&targetMatch){
-        cellStates[tci].landPulse=1;
-        dead.push(fi);
-        continue;
+        cellStates[tci].landPulse=1;dead.push(fi);continue;
       }
-
-      // Retarget: if close to target but it doesn't match, find a nearby cell that does
       if(d<20||(!targetMatch&&t%5===(fi%5))){
         const fc=Math.floor(f.x*dpr/CELL_W),fr=Math.floor(f.y*dpr/CELL_H);
         const R=8;let bci=-1,bd=Infinity;
@@ -1049,38 +1113,22 @@ fn toClip(px:vec2f)->vec2f{
         }
         if(bci>=0){f.tc=bci%COLS;f.tr=(bci/COLS)|0;}
       }
-
-      // Fade: visible while in flight, fade out as it approaches
       f.a=Math.min(1,d/25)*0.7;
     }
-
-    // Remove dead (reverse order to preserve indices)
     for(let i=dead.length-1;i>=0;i--)floaters.splice(dead[i],1);
 
-    // Draw remaining floaters — transition from bright white to glyph color
     for(const f of floaters){
       if(f.a<0.01)continue;
       f.age=(f.age||0)+1;
-      const ageFrac=Math.min(1,f.age/90); // transition over ~1.5 seconds
-      // Interpolate from white (255,252,240) to glyph lavender (184,181,172)
+      const ageFrac=Math.min(1,f.age/90);
       const r=Math.round(255-ageFrac*71);
       const g=Math.round(252-ageFrac*71);
       const b=Math.round(240-ageFrac*68);
-      const a=f.a*(1-ageFrac*0.3); // also slightly reduce alpha as it ages
-      octx.strokeStyle=`rgba(${r},${g},${b},${a.toFixed(2)})`;
-      octx.lineWidth=1.2/zoomLevel;octx.lineCap='round';octx.lineJoin='round';
+      const a=f.a*(1-ageFrac*0.3);
       const sz=f.sz,hx=f.x-sz/2,hy=f.y-sz/2;
-      for(let s=0;s<MAX_STROKES;s++){
-        octx.beginPath();let has=false;
-        for(let p=0;p<STROKE_PTS;p++){
-          const bi=(s*STROKE_PTS+p)*2;
-          const vx=f.v[bi],vy=f.v[bi+1];
-          if(p===0)octx.moveTo(hx+vx*sz,hy+vy*sz);
-          else{const pb=(s*STROKE_PTS+p-1)*2;
-            if(Math.abs(vx-f.v[pb])>0.001||Math.abs(vy-f.v[pb+1])>0.001){octx.lineTo(hx+vx*sz,hy+vy*sz);has=true;}}
-        }
-        if(has)octx.stroke();
-      }
+      const pts=[];
+      for(let i=0;i<VERTS_PER_G;i++) pts.push([hx+f.v[i*2]*sz, hy+f.v[i*2+1]*sz]);
+      smoothAndDrawRibbon(pts, sz*0.03, 'rgba('+r+','+g+','+b+','+a.toFixed(2)+')', f.gi*2.399, true);
     }
     octx.restore();
   }
@@ -1242,8 +1290,6 @@ fn toClip(px:vec2f)->vec2f{
       return;
     }
     // Single touch/mouse: always draw
-    const types=new Set();for(const f of floaters)types.add(f.gi);
-    if(types.size>1)return;
     e.preventDefault();drawing=true;pinching=false;drawPoints=[ptrPos(e)];
   }
   function moveDraw(e){
