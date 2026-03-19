@@ -1014,9 +1014,9 @@ fn toClip(px:vec2f)->vec2f{
   // Intro animation timing (in frames from when canvas starts fading in)
   // Fade-in takes ~120 frames (2s), so intro starts after that
   const INTRO_BRIGHTEN_START=140;   // earliest frame when a cell can start brightening
-  const INTRO_BRIGHTEN_DUR=90;     // frames for color/width transition per cell
-  const INTRO_SPREAD=600;           // window over which cells start their brighten
-  const INTRO_REVEAL_DELAY=40;     // frames after brighten START that the letter morph begins
+  const INTRO_BRIGHTEN_DUR=40;     // frames for color/width transition per cell (was 90)
+  const INTRO_SPREAD=300;           // window over which cells start their brighten (was 600)
+  const INTRO_REVEAL_DELAY=5;      // frames after brighten START that the letter morph begins (was 40)
   // Pre-allocated wave partial buffers (reused every frame)
   const _aRP=new Float64Array(aN), _cRP=new Float64Array(cN);
   const _aTimeP=new Float64Array(aN), _cTimeP=new Float64Array(cN);
@@ -1309,7 +1309,7 @@ fn toClip(px:vec2f)->vec2f{
           cs.glyphA=Math.floor(Math.random()*N_GLYPHS);
           cs.glyphB=cs.glyphA;cs.morphT=1;
           cs.introBrighten=t+Math.max(0,INTRO_BRIGHTEN_START-t)+Math.floor(Math.random()*INTRO_SPREAD);
-          cs.introReveal=cs.introBrighten+INTRO_REVEAL_DELAY+Math.floor(Math.random()*60);
+          cs.introReveal=cs.introBrighten+INTRO_REVEAL_DELAY+Math.floor(Math.random()*5);
         } else {
           cs.isBanner=true;cs.glyphB=bannerGrid[i];
         }
@@ -1541,7 +1541,7 @@ fn toClip(px:vec2f)->vec2f{
         cs.glyphB=cs.glyphA;
         cs.morphT=1;
         cs.introBrighten=INTRO_BRIGHTEN_START+Math.floor(Math.random()*INTRO_SPREAD);
-        cs.introReveal=cs.introBrighten+INTRO_REVEAL_DELAY+Math.floor(Math.random()*60);
+        cs.introReveal=cs.introBrighten+INTRO_REVEAL_DELAY+Math.floor(Math.random()*5);
       }
     }
   }
@@ -1610,7 +1610,7 @@ fn toClip(px:vec2f)->vec2f{
         cs.glyphB=cs.glyphA;
         cs.morphT=1;
         cs.introBrighten=INTRO_BRIGHTEN_START+Math.floor(Math.random()*INTRO_SPREAD);
-        cs.introReveal=cs.introBrighten+INTRO_REVEAL_DELAY+Math.floor(Math.random()*60);
+        cs.introReveal=cs.introBrighten+INTRO_REVEAL_DELAY+Math.floor(Math.random()*5);
       }
     }
   }
