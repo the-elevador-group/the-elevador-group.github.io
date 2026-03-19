@@ -7,14 +7,17 @@
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { background: #0a0a0a; overflow: hidden; width: 100vw; height: 100vh; touch-action: none; }
-canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+canvas { display: block; width: 100vw; height: 100vh; touch-action: none; opacity: 0; }
 #err { color: #f88; font-family: monospace; padding: 2rem; }
+#loader { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); width:120px; height:1px; background:rgba(184,181,172,0.3); z-index:10; }
+#loaderBar { height:100%; width:0%; background:rgb(255,252,240); }
 </style>
 </head>
 <body>
 <canvas id="cv"></canvas>
 <canvas id="drawOverlay" style="position:absolute;top:0;left:0;width:100vw;height:100vh;pointer-events:none;z-index:1"></canvas>
 <div id="err" style="display:none"></div>
+<div id="loader"><div id="loaderBar"></div></div>
 <script>
 // ─────────────────────────────────────────────────────────────────────────────
 // GLYPH DEFINITIONS
@@ -700,7 +703,7 @@ function buildAllCrops(LC, LR, SC, LG, COLS, ROWS) {
       if (gc>=0 && gc<COLS && ci!==undefined) textMap[gc+','+ulRow]={glyphIdx:ci, instanceIdx:ii};
     }
   }
-  return { textMap, cropGlyphVerts, N_TOTAL: nextCropIdx, LC, LR, SC };
+  return { textMap, cropGlyphVerts, N_TOTAL: nextCropIdx, LC, LR, SC, startCol, startRow, dCol };
 }
 
 const LETTER_INSTANCE_PHASES = [];
@@ -718,11 +721,41 @@ const CHAR_CYCLES=1.0,ALPHA_CYCLES=1.2,MAX_SH=37,PAD_FRAC=0.18;
 // RENDERER
 // ═══════════════════════════════════════════════════════════════════════════
 async function main(){
+  const loaderBar=document.getElementById('loaderBar');
+  let targetPct=0, currentPct=0;
+  // Animate the bar smoothly toward targetPct using requestAnimationFrame
+  let animating=true;
+  function animateBar(){
+    if(!animating)return;
+    currentPct+=(targetPct-currentPct)*0.15;
+    if(Math.abs(currentPct-targetPct)<0.3)currentPct=targetPct;
+    loaderBar.style.width=currentPct+'%';
+    requestAnimationFrame(animateBar);
+  }
+  requestAnimationFrame(animateBar);
+  function progress(pct){targetPct=pct;}
+  const yieldFrame=()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+
+  progress(10);
+  await yieldFrame();
+
   const cv=document.getElementById('cv');
   if(!navigator.gpu){fallback('WebGPU not supported.');return;}
+
+  progress(20);
+  await yieldFrame();
+
   const adapter=await navigator.gpu.requestAdapter();
   if(!adapter){fallback('No adapter.');return;}
+
+  progress(35);
+  await yieldFrame();
+
   const device=await adapter.requestDevice();
+
+  progress(50);
+  await yieldFrame();
+
   const ctx=cv.getContext('webgpu');
   const fmt=navigator.gpu.getPreferredCanvasFormat();
   const dpr=window.devicePixelRatio||1;
@@ -736,6 +769,9 @@ async function main(){
   }
   computeLayout();
   ctx.configure({device,format:fmt,alphaMode:'opaque'});
+
+  progress(65);
+  await yieldFrame();
 
   const LINE_HALF_WIDTH=0.5;
   const CELL_STRIDE=24;
@@ -975,6 +1011,12 @@ fn toClip(px:vec2f)->vec2f{
   for(let i=0;i<cN;i++){cKx[i]=charWaves[i].kx;cKy[i]=charWaves[i].ky;cSpd[i]=charWaves[i].speed;cPh[i]=charWaves[i].phase;}
   const SCROLL_SPEED=0.3;
   let scrollAccum=0, scrollRowInt=0;
+  // Intro animation timing (in frames from when canvas starts fading in)
+  // Fade-in takes ~120 frames (2s), so intro starts after that
+  const INTRO_BRIGHTEN_START=140;   // earliest frame when a cell can start brightening
+  const INTRO_BRIGHTEN_DUR=90;     // frames for color/width transition per cell
+  const INTRO_SPREAD=600;           // window over which cells start their brighten
+  const INTRO_REVEAL_DELAY=40;     // frames after brighten START that the letter morph begins
   // Pre-allocated wave partial buffers (reused every frame)
   const _aRP=new Float64Array(aN), _cRP=new Float64Array(cN);
   const _aTimeP=new Float64Array(aN), _cTimeP=new Float64Array(cN);
@@ -1235,7 +1277,8 @@ fn toClip(px:vec2f)->vec2f{
   }
 
   // ── Main frame loop ──
-  function frame(){t++;computeLayout();const nCells=COLS*ROWS;
+  function frame(){
+    t++;computeLayout();const nCells=COLS*ROWS;
     if(COLS!==prevCols||ROWS!==prevRows){
       prevCols=COLS;prevRows=ROWS;
       const maxBC=Math.floor(COLS*0.98),maxBR=Math.floor(ROWS*0.50);
@@ -1256,8 +1299,21 @@ fn toClip(px:vec2f)->vec2f{
       bannerTotal=0;for(let i=0;i<nCells;i++)if(bannerGrid[i]>=0)bannerTotal++;
 
       initCells(nCells);ensureCellBuf(nCells);rebuildGlyphBufAndPipeline(cr);
+      // Check if we're still in intro phase
+      const inIntro=t<INTRO_BRIGHTEN_START+INTRO_SPREAD+INTRO_REVEAL_DELAY+200;
       for(let i=0;i<nCells;i++)if(bannerGrid[i]>=0){const cs=cellStates[i];
-        cs.isBanner=true;cs.bannerGlyph=bannerGrid[i];cs.letterInstance=bannerInstGrid[i];cs.glyphB=bannerGrid[i];}
+        cs.bannerGlyph=bannerGrid[i];cs.letterInstance=bannerInstGrid[i];
+        if(inIntro){
+          // Preserve intro: start as background glyph
+          cs.isBanner=false;
+          cs.glyphA=Math.floor(Math.random()*N_GLYPHS);
+          cs.glyphB=cs.glyphA;cs.morphT=1;
+          cs.introBrighten=t+Math.max(0,INTRO_BRIGHTEN_START-t)+Math.floor(Math.random()*INTRO_SPREAD);
+          cs.introReveal=cs.introBrighten+INTRO_REVEAL_DELAY+Math.floor(Math.random()*60);
+        } else {
+          cs.isBanner=true;cs.glyphB=bannerGrid[i];
+        }
+      }
       createMSAATexture();
       scrollAccum=0;
     }
@@ -1309,6 +1365,26 @@ fn toClip(px:vec2f)->vec2f{
       const idx=rowBase+col,cs=cellStates[idx];
       const bi=bannerGrid[idx];cs.bannerGlyph=bi;const inBZ=bi>=0;
 
+      // INTRO: trigger banner reveal at the cell's assigned reveal time
+      if(inBZ && !cs.isBanner && cs.introReveal!==undefined && t>=cs.introReveal){
+        cs.isBanner=true;
+        // Start morphing to the banner glyph
+        if(cs.glyphB!==bi){cs.glyphB=bi;cs.morphT=0;}
+        delete cs.introReveal; // done, won't trigger again
+      }
+
+      // INTRO: per-cell brighten factor (0=bg style, 1=banner style)
+      let introFactor=0;
+      if(inBZ && cs.introBrighten!==undefined){
+        if(t>=cs.introBrighten){
+          introFactor=Math.min(1,(t-cs.introBrighten)/INTRO_BRIGHTEN_DUR);
+        }
+        // introFactor stays 0 before brighten starts, ramps to 1, stays at 1 after
+      } else if(inBZ && cs.introBrighten===undefined){
+        // No introBrighten means already past intro (resize after intro, or never had one)
+        introFactor=1;
+      }
+
       // Advance morph
       const newMT=cs.morphT+cs.morphSpeed;
       cs.morphT=newMT>=1?1:newMT;
@@ -1318,7 +1394,9 @@ fn toClip(px:vec2f)->vec2f{
         cs.noiseVal+=(Math.random()-0.5)*0.14;cs.noiseVal*=0.96;
 
         let desired;
-        if(inBZ&&cs.flickerTimer<=0){
+        // During intro: banner cells stay as background glyphs until their reveal time
+        const introRevealed=cs.introReveal===undefined; // true once intro reveal has happened
+        if(inBZ&&cs.flickerTimer<=0&&introRevealed){
           cs.isBanner=true;desired=bi;
         } else {
           const pool=N_GLYPHS+userGlyphCount;
@@ -1330,7 +1408,7 @@ fn toClip(px:vec2f)->vec2f{
 
         if(desired!==cs.glyphB){cs.glyphB=desired;cs.morphT=0;}
 
-        if(inBZ){
+        if(inBZ&&introRevealed){
           if(cs.flickerTimer>0){cs.flickerTimer--;if(cs.flickerTimer<=0)cs.isBanner=true;}
           else if(Math.random()<0.0005&&bannerFlickering<banFlickerLimit){
             cs.isBanner=false;cs.flickerTimer=1+Math.floor(Math.random()*6);bannerFlickering++;}
@@ -1353,12 +1431,19 @@ fn toClip(px:vec2f)->vec2f{
       // Alpha — banner cells are clamped to >=0.85 anyway, skip wave computation
       let alpha;
       if(inBZ&&cs.glyphA===bi&&cs.glyphB===bi&&cs.morphT>=1){
-        alpha=0.85; // steady banner: use constant alpha, skip sin calls
+        alpha=0.85;
       } else {
         let aR=0;for(let i=0;i<aN;i++)aR+=Math.sin(col*aKx[i]+_aRP[i]);
         const frac=(((aR+aN)/(aN*2)*ALPHA_CYCLES%1)+1)%1;
         const sinF=Math.sin(frac*π2);
-        alpha=inBZ?Math.max(0.08+0.82*sinF,0.85):0.08+0.78*sinF;
+        const bgAlpha=0.08+0.78*sinF;
+        if(inBZ){
+          // During intro brighten: smoothly raise alpha from bg level to banner level
+          const banAlpha=Math.max(0.08+0.82*sinF,0.85);
+          alpha=bgAlpha+(banAlpha-bgAlpha)*introFactor;
+        } else {
+          alpha=bgAlpha;
+        }
       }
 
       let lb=0;
@@ -1372,16 +1457,21 @@ fn toClip(px:vec2f)->vec2f{
       } else if(aIsBan&&bIsBan){
         hw=bHW; bsw=1;
       } else if(!aIsBan&&!bIsBan){
-        hw=banBgHW; bsw=0;
+        // During intro brighten: smoothly increase hw and bsw from bg toward banner
+        hw=baseHW+lb + (banBgHW-baseHW)*introFactor;
+        bsw=introFactor*0.5; // partial banner sizing during brighten
       } else if(aIsBan){
         hw=bHW+(banBgHW-bHW)*cs.morphT; bsw=1-cs.morphT;
       } else {
         hw=banBgHW+(bHW-banBgHW)*cs.morphT; bsw=cs.morphT;
       }
 
+      // During intro: don't flag as banner zone until brightening starts
+      // This keeps the glyph color as lavender (background) instead of white
+      const useBanZoneFlag = inBZ && introFactor > 0;
       cellF32[off]=cs.morphT;cellF32[off+1]=alpha;
       cellU32[off+2]=cs.glyphA;cellU32[off+3]=cs.glyphB;
-      cellF32[off+4]=hw;cellF32[off+5]=bsw+(inBZ?2.0:0.0);
+      cellF32[off+4]=hw;cellF32[off+5]=bsw+(useBanZoneFlag?2.0:0.0);
     }}
 
     device.queue.writeBuffer(cellBuf,0,cellData,0,nCells*CELL_STRIDE);
@@ -1392,17 +1482,153 @@ fn toClip(px:vec2f)->vec2f{
       clearValue:{r:0.039,g:0.039,b:0.039,a:1},loadOp:'clear',storeOp:'discard'}]});
     pass.setPipeline(pipeline);pass.setBindGroup(0,bindGroup);
     pass.draw(VERTS_PER_INST,nCells*MAX_STROKES*(STROKE_PTS-1),0,0);
-    pass.end();device.queue.submit([enc.finish()]);requestAnimationFrame(frame);}
-  requestAnimationFrame(frame);
+    pass.end();device.queue.submit([enc.finish()]);
+    requestAnimationFrame(frame);}
 
-  // ═══════════════════════════════════════════════════════════════════
-  // USER-DRAWN GLYPHS
-  // ═══════════════════════════════════════════════════════════════════
+  // Do initial crop build + pipeline here with yields (not in first frame loop iteration)
+  progress(70);
+  await yieldFrame();
+
+  const nCells0=COLS*ROWS;
+  const maxBC0=Math.floor(COLS*0.98),maxBR0=Math.floor(ROWS*0.50);
+  let LC0=20,LR0,SC0;
+  while(LC0>=1){SC0=Math.max(1,Math.round(LC0*0.35));const gap=LC0<=3?0:1;
+    let tc=0;for(const ch of PHRASE)tc+=(ch===' '?SC0:LC0)+gap;tc-=gap;
+    LR0=Math.max(1,Math.round(LC0*CELL_W/CELL_H));
+    if(tc<=maxBC0&&LR0<=maxBR0)break;LC0--;}
+  LC0=Math.max(1,LC0);LR0=Math.max(1,Math.round(LC0*CELL_W/CELL_H));
+
+  progress(78);
+  await yieldFrame();
+
+  const cr0=buildAllCrops(LC0,LR0,SC0,LC0<=3?0:1,COLS,ROWS);textMap=cr0.textMap;
+
+  progress(86);
+  await yieldFrame();
+
+  bannerGrid=new Int16Array(nCells0).fill(-1);
+  bannerInstGrid=new Int16Array(nCells0).fill(-1);
+  for(const key in textMap){const te=textMap[key],p=key.split(','),ci=(+p[1])*COLS+(+p[0]);
+    bannerGrid[ci]=te.glyphIdx;bannerInstGrid[ci]=te.instanceIdx;}
+  bannerTotal=0;for(let i=0;i<nCells0;i++)if(bannerGrid[i]>=0)bannerTotal++;
+  initCells(nCells0);ensureCellBuf(nCells0);
+
+  progress(92);
+  await yieldFrame();
+
+  rebuildGlyphBufAndPipeline(cr0);
+  // INTRO: banner cells start showing background glyphs, not the banner letters
+  // Exception: underline cells start active (white/wide/pulsing) from the beginning
+  const ulRowIdx=cr0.startRow+cr0.LR;
+  const ulColS=cr0.dCol>=0?cr0.dCol:0;
+  const ulColE=ulColS+cr0.LC;
+  for(let i=0;i<nCells0;i++){
+    const cs=cellStates[i];
+    if(bannerGrid[i]>=0){
+      cs.bannerGlyph=bannerGrid[i];
+      cs.letterInstance=bannerInstGrid[i];
+      const row=Math.floor(i/COLS), col=i%COLS;
+      const isUnderline=row===ulRowIdx && col>=ulColS && col<ulColE;
+      if(isUnderline){
+        // Underline: start fully active from frame 0
+        cs.isBanner=true;
+        cs.glyphA=bannerGrid[i];
+        cs.glyphB=bannerGrid[i];
+        cs.morphT=1;
+      } else {
+        cs.isBanner=false;
+        cs.glyphA=Math.floor(Math.random()*N_GLYPHS);
+        cs.glyphB=cs.glyphA;
+        cs.morphT=1;
+        cs.introBrighten=INTRO_BRIGHTEN_START+Math.floor(Math.random()*INTRO_SPREAD);
+        cs.introReveal=cs.introBrighten+INTRO_REVEAL_DELAY+Math.floor(Math.random()*60);
+      }
+    }
+  }
+  createMSAATexture();
+  prevCols=COLS;prevRows=ROWS; // prevent frame loop from redoing this work
+
+  progress(100);
+  // Wait for the bar animation to visually reach 100%
+  await new Promise(r=>{
+    function check(){if(currentPct>=99.5){r();}else{requestAnimationFrame(check);}}
+    check();
+  });
+  await new Promise(r=>setTimeout(r,200));
+  animating=false;
+
+  // Compute the underline's screen position
+  const ulRow=cr0.startRow+cr0.LR;
+  const ulColStart=cr0.dCol>=0?cr0.dCol:cr0.startCol;
+  // Underline center Y in CSS pixels
+  const ulY=(ulRow+0.5)*CELL_H/dpr;
+  // Underline left/right X in CSS pixels
+  const ulLeftX=ulColStart*CELL_W/dpr;
+  const ulRightX=(ulColStart+cr0.LC)*CELL_W/dpr;
+  const ulWidth=ulRightX-ulLeftX;
+  const ulCenterX=(ulLeftX+ulRightX)/2;
+
+  // Morph the loader bar to the underline position and width
+  const loaderEl=document.getElementById('loader');
+  if(loaderEl){
+    loaderEl.style.transition='all 0.6s ease-in-out';
+    loaderEl.style.left=ulCenterX+'px';
+    loaderEl.style.top=ulY+'px';
+    loaderEl.style.width=ulWidth+'px';
+  }
+
+  // Set up overlay canvas since drawFloaters needs octx
   let drawing=false,drawPoints=[];
   const overlay=document.getElementById('drawOverlay');
   const octx=overlay.getContext('2d');
   function resizeOverlay(){overlay.width=window.innerWidth;overlay.height=window.innerHeight;}
   resizeOverlay();window.addEventListener('resize',resizeOverlay);
+
+  // Wait for loader bar morph transition
+  await new Promise(r=>setTimeout(r,650));
+
+  // Force reflow so browser registers the current opacity:0 before we transition
+  cv.offsetHeight;
+
+  // Reset frame counter and re-init intro state BEFORE starting the frame loop
+  t=0;
+  for(let i=0;i<nCells0;i++){
+    const cs=cellStates[i];
+    if(bannerGrid[i]>=0){
+      const row=Math.floor(i/COLS), col=i%COLS;
+      const isUnderline=row===ulRowIdx && col>=ulColS && col<ulColE;
+      if(isUnderline){
+        cs.isBanner=true;
+        cs.glyphA=bannerGrid[i];
+        cs.glyphB=bannerGrid[i];
+        cs.morphT=1;
+        delete cs.introBrighten;
+        delete cs.introReveal;
+      } else {
+        cs.isBanner=false;
+        cs.glyphA=Math.floor(Math.random()*N_GLYPHS);
+        cs.glyphB=cs.glyphA;
+        cs.morphT=1;
+        cs.introBrighten=INTRO_BRIGHTEN_START+Math.floor(Math.random()*INTRO_SPREAD);
+        cs.introReveal=cs.introBrighten+INTRO_REVEAL_DELAY+Math.floor(Math.random()*60);
+      }
+    }
+  }
+
+  // NOW start rendering and fade in
+  cv.style.transition='opacity 2.0s ease-in';
+  cv.style.opacity='1';
+  const overlayEl=document.getElementById('drawOverlay');
+  if(overlayEl){overlayEl.style.transition='opacity 2.0s ease-in';overlayEl.style.opacity='1';}
+
+  requestAnimationFrame(frame);
+
+  // Remove loader after canvas is fully visible
+  setTimeout(()=>{if(loaderEl&&loaderEl.parentNode)loaderEl.remove();},2200);
+
+  // ═══════════════════════════════════════════════════════════════════
+  // USER-DRAWN GLYPHS
+  // ═══════════════════════════════════════════════════════════════════
   function drawLiveTrace(){}
   function ptrPos(e){const r=cv.getBoundingClientRect();
     return{x:(e.touches?e.touches[0].clientX:e.clientX)-r.left,
