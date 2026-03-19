@@ -1013,10 +1013,10 @@ fn toClip(px:vec2f)->vec2f{
   let scrollAccum=0, scrollRowInt=0;
   // Intro animation timing (in frames from when canvas starts fading in)
   // Fade-in takes ~120 frames (2s), so intro starts after that
-  const INTRO_BRIGHTEN_START=140;   // earliest frame when a cell can start brightening
-  const INTRO_BRIGHTEN_DUR=40;     // frames for color/width transition per cell (was 90)
-  const INTRO_SPREAD=300;           // window over which cells start their brighten (was 600)
-  const INTRO_REVEAL_DELAY=5;      // frames after brighten START that the letter morph begins (was 40)
+  const INTRO_BRIGHTEN_START=0;     // start immediately with fade-in
+  const INTRO_BRIGHTEN_DUR=40;     // frames for color/width transition per cell
+  const INTRO_SPREAD=180;           // all cells start brightening within ~3 seconds
+  const INTRO_REVEAL_DELAY=5;      // letter morph starts almost immediately after brighten
   // Pre-allocated wave partial buffers (reused every frame)
   const _aRP=new Float64Array(aN), _cRP=new Float64Array(cN);
   const _aTimeP=new Float64Array(aN), _cTimeP=new Float64Array(cN);
@@ -1457,9 +1457,15 @@ fn toClip(px:vec2f)->vec2f{
       } else if(aIsBan&&bIsBan){
         hw=bHW; bsw=1;
       } else if(!aIsBan&&!bIsBan){
-        // During intro brighten: smoothly increase hw and bsw from bg toward banner
-        hw=baseHW+lb + (banBgHW-baseHW)*introFactor;
-        bsw=introFactor*0.5; // partial banner sizing during brighten
+        // Banner zone showing background glyph (flicker or pre-reveal)
+        // Post-intro: use banBgHW with no sizing weight (same as end of aIsBan morph)
+        // During intro: smoothly increase from bg toward banner style
+        if(introFactor>=1){
+          hw=banBgHW+lb; bsw=0;
+        } else {
+          hw=baseHW+lb + (banBgHW-baseHW)*introFactor;
+          bsw=0;
+        }
       } else if(aIsBan){
         hw=bHW+(banBgHW-bHW)*cs.morphT; bsw=1-cs.morphT;
       } else {
@@ -1558,13 +1564,21 @@ fn toClip(px:vec2f)->vec2f{
   animating=false;
 
   // Compute the underline's screen position
+  // The underline is at row = startRow+LR, columns dCol to dCol+LC-1
+  // UNDERLINE_DEF goes from [0.1, 0.5] to [0.9, 0.5] within the letter cell area
   const ulRow=cr0.startRow+cr0.LR;
   const ulColStart=cr0.dCol>=0?cr0.dCol:cr0.startCol;
-  // Underline center Y in CSS pixels
+  // The underline spans LC cells. Within each cell, the banner glyph fills the full cell.
+  // Y position: center of the underline row
   const ulY=(ulRow+0.5)*CELL_H/dpr;
-  // Underline left/right X in CSS pixels
-  const ulLeftX=ulColStart*CELL_W/dpr;
-  const ulRightX=(ulColStart+cr0.LC)*CELL_W/dpr;
+  // X position: from first underline cell's left edge to last cell's right edge
+  // The underline strokes at 0.1-0.9 within the LC-cell span
+  const ulFullLeftX=ulColStart*CELL_W/dpr;
+  const ulFullRightX=(ulColStart+cr0.LC)*CELL_W/dpr;
+  const ulFullWidth=ulFullRightX-ulFullLeftX;
+  // Account for the 0.1-0.9 range of the underline definition
+  const ulLeftX=ulFullLeftX+ulFullWidth*0.1;
+  const ulRightX=ulFullLeftX+ulFullWidth*0.9;
   const ulWidth=ulRightX-ulLeftX;
   const ulCenterX=(ulLeftX+ulRightX)/2;
 
