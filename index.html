@@ -1134,7 +1134,8 @@ fn toClip(px:vec2f)->vec2f{
 
   // Precompute ribbon outline from glyph vertex buffer in normalized [0,1] space
   // Returns {left:[[x,y],...], right:[[x,y],...]} or null if degenerate
-  function precomputeRibbon(verts, phase) {
+  function precomputeRibbon(verts, phase, baseW) {
+    if(!baseW) baseW=0.03;
     // Collect all points in [0,1] glyph space
     const n = verts.length / 2;
     const raw = new Array(n);
@@ -1168,8 +1169,6 @@ fn toClip(px:vec2f)->vec2f{
     const invTotal = 1/totalLen;
     const PI = Math.PI, PI2 = PI*2;
     const phaseVal = phase||0;
-    // Normalized width = 0.03 (matches sz*0.03 / sz)
-    const baseW = 0.03;
 
     // Build left/right outlines in normalized space
     const left = [], right = [], center = [];
@@ -1844,9 +1843,12 @@ fn toClip(px:vec2f)->vec2f{
     const gridBcy=((bcy-halfH)/zoomLevel + panY*halfH/zoomLevel) + halfH;
     const gridSize=size/zoomLevel;
     const excl=new Set();
-    const ribbon=precomputeRibbon(nv, ri*2.399);
+    // Ribbon baseW in normalized space: trace width / gridSize
+    // Trace width in grid space = LINE_HALF_WIDTH*dpr*2.2
+    const ribbonBaseW=LINE_HALF_WIDTH*dpr*2.2/gridSize;
+    const ribbon=precomputeRibbon(nv, ri*2.399, ribbonBaseW);
     for(let i=0;i<25;i++){
-      const sx2=gridBcx+(Math.random()-0.5)*gridSize*0.4,sy2=gridBcy+(Math.random()-0.5)*gridSize*0.4;
+      const sx2=gridBcx,sy2=gridBcy;
       const tg=findTarget(ri,excl,sx2,sy2);excl.add(tg.row*COLS+tg.col);
       floaters.push({x:sx2,y:sy2,vx:(Math.random()-0.5)*2,vy:(Math.random()-0.5)*2,
         tc:tg.col,tr:tg.row,ribbon:ribbon,gi:ri,a:0.75,age:0,
