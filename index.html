@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0a0a0a">
 <title>THE ELEVADOR GROUP</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -19,6 +20,8 @@ canvas { display: block; width: 100vw; height: 100vh; touch-action: none; opacit
 <div id="err" style="display:none"></div>
 <div id="loader"><div id="loaderBar"></div></div>
 <script>
+// Let the browser paint the black background + loader bar before executing heavy JS
+requestAnimationFrame(()=>{
 // ─────────────────────────────────────────────────────────────────────────────
 // GLYPH DEFINITIONS
 // Each glyph is a list of strokes. Each stroke is a polyline of [x,y] in 0..1.
@@ -1007,7 +1010,8 @@ fn toClip(px:vec2f)->vec2f{
     glyphA:Math.floor(Math.random()*N_GLYPHS),glyphB:Math.floor(Math.random()*N_GLYPHS),
     morphT:Math.random(),morphSpeed:0.007+Math.random()*0.006,
     isLetter:false,dwellLeft:0,isBanner:false,bannerGlyph:-1,letterInstance:-1,
-    flickerTimer:0,landPulse:0,noiseVal:Math.random()*2-1}));}
+    flickerTimer:0,landPulse:0,noiseVal:Math.random()*2-1,
+    introBrighten:-1,introReveal:-1}));}
 
   let prevCols=0,prevRows=0,t=0;
   const aN=alphaWaves.length,cN=charWaves.length;
@@ -1232,6 +1236,8 @@ fn toClip(px:vec2f)->vec2f{
     octx.scale(zoomLevel,zoomLevel);
     octx.translate(-cx,-cy);
 
+    const cwDpr=CELL_W/dpr, chDpr=CELL_H/dpr;
+
     if(!cgBuf||cgBuf.length<nCells)cgBuf=new Int32Array(nCells);
     for(let i=0;i<nCells&&i<cellStates.length;i++){
       const cs=cellStates[i];
@@ -1241,7 +1247,7 @@ fn toClip(px:vec2f)->vec2f{
     const dead=[];
     for(let fi=0;fi<floaters.length;fi++){
       const f=floaters[fi];
-      const tx=(f.tc+0.5)*CELL_W/dpr,ty=(f.tr+0.5)*CELL_H/dpr;
+      const tx=(f.tc+0.5)*cwDpr,ty=(f.tr+0.5)*chDpr;
       const dx=tx-f.x,dy=ty-f.y,d=Math.sqrt(dx*dx+dy*dy);
       const acc=d<30?0.25:0.15;
       if(d>0.5){f.vx+=dx/d*acc;f.vy+=dy/d*acc;}
@@ -1261,7 +1267,7 @@ fn toClip(px:vec2f)->vec2f{
         for(let row=r0;row<=r1;row++)for(let col=c0;col<=c1;col++){
           const ci=row*COLS+col;
           if(cgBuf[ci]!==f.gi)continue;
-          const ddx=(col+0.5)*CELL_W/dpr-f.x,ddy=(row+0.5)*CELL_H/dpr-f.y;
+          const ddx=(col+0.5)*cwDpr-f.x,ddy=(row+0.5)*chDpr-f.y;
           const dd=ddx*ddx+ddy*ddy;if(dd<bd){bd=dd;bci=ci;}
         }
         if(bci>=0){f.tc=bci%COLS;f.tr=(bci/COLS)|0;}
@@ -1371,25 +1377,35 @@ fn toClip(px:vec2f)->vec2f{
       for(let col=0;col<COLS;col++){
       const idx=rowBase+col,cs=cellStates[idx];
       const bi=bannerGrid[idx];cs.bannerGlyph=bi;const inBZ=bi>=0;
+      const off=idx*STRIDE6;
+
+      // For off-screen cells: only advance morph, write zero hw
+      if(!rowVis||col<visColMin||col>visColMax){
+        const newMT=cs.morphT+cs.morphSpeed;
+        cs.morphT=newMT>=1?1:newMT;
+        if(cs.morphT>=1)cs.glyphA=cs.glyphB;
+        cellF32[off]=cs.morphT;cellF32[off+1]=0;
+        cellU32[off+2]=cs.glyphA;cellU32[off+3]=cs.glyphB;
+        cellF32[off+4]=0;cellF32[off+5]=0;
+        continue;
+      }
 
       // INTRO: trigger banner reveal at the cell's assigned reveal time
-      if(inBZ && !cs.isBanner && cs.introReveal!==undefined && t>=cs.introReveal){
+      if(inBZ && !cs.isBanner && cs.introReveal>0 && t>=cs.introReveal){
         cs.isBanner=true;
-        // Start morphing to the banner glyph
         if(cs.glyphB!==bi){cs.glyphB=bi;cs.morphT=0;}
-        delete cs.introReveal; // done, won't trigger again
+        cs.introReveal=-1; // sentinel: done (avoid delete which deoptimizes)
       }
 
       // INTRO: per-cell brighten factor (0=bg style, 1=banner style)
       let introFactor=0;
-      if(inBZ && cs.introBrighten!==undefined){
-        if(t>=cs.introBrighten){
-          introFactor=Math.min(1,(t-cs.introBrighten)/INTRO_BRIGHTEN_DUR);
+      if(inBZ){
+        const ib=cs.introBrighten;
+        if(ib>0){
+          if(t>=ib) introFactor=Math.min(1,(t-ib)/INTRO_BRIGHTEN_DUR);
+        } else {
+          introFactor=1; // ib<=0 means past intro or never had one
         }
-        // introFactor stays 0 before brighten starts, ramps to 1, stays at 1 after
-      } else if(inBZ && cs.introBrighten===undefined){
-        // No introBrighten means already past intro (resize after intro, or never had one)
-        introFactor=1;
       }
 
       // Advance morph
@@ -1402,7 +1418,7 @@ fn toClip(px:vec2f)->vec2f{
 
         let desired;
         // During intro: banner cells stay as background glyphs until their reveal time
-        const introRevealed=cs.introReveal===undefined; // true once intro reveal has happened
+        const introRevealed=cs.introReveal<0; // -1 = revealed, >0 = not yet
         if(inBZ&&cs.flickerTimer<=0&&introRevealed){
           cs.isBanner=true;desired=bi;
         } else {
@@ -1424,15 +1440,6 @@ fn toClip(px:vec2f)->vec2f{
 
       if(inBZ && !(cs.glyphA===bi && cs.glyphB===bi && cs.morphT>=1)){
         bannerFlickering++;
-      }
-
-      // For off-screen cells: still update state but write zero hw to skip GPU work
-      const off=idx*STRIDE6;
-      if(!rowVis||col<visColMin||col>visColMax){
-        cellF32[off]=cs.morphT;cellF32[off+1]=0;
-        cellU32[off+2]=cs.glyphA;cellU32[off+3]=cs.glyphB;
-        cellF32[off+4]=0;cellF32[off+5]=0; // hw=0 collapses all geometry
-        continue;
       }
 
       // Alpha — banner cells are clamped to >=0.85 anyway, skip wave computation
@@ -1623,8 +1630,8 @@ fn toClip(px:vec2f)->vec2f{
         cs.glyphA=bannerGrid[i];
         cs.glyphB=bannerGrid[i];
         cs.morphT=1;
-        delete cs.introBrighten;
-        delete cs.introReveal;
+        cs.introBrighten=-1;
+        cs.introReveal=-1;
       } else {
         cs.isBanner=false;
         cs.glyphA=Math.floor(Math.random()*N_GLYPHS);
@@ -1880,6 +1887,7 @@ function fallback(msg){document.getElementById('err').style.display='block';
   document.getElementById('err').textContent=msg+' — WebGPU: Chrome/Edge 113+.';
   document.getElementById('cv').style.display='none';}
 main().catch(e=>fallback(e.message));
+});
 </script>
 </body>
 </html>
