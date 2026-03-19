@@ -91,17 +91,115 @@ function sampleStroke(segs, n) {
 // strokes: array of segment arrays (each is passed to sampleStroke)
 // Pads with a degenerate zero-length stroke at centroid if fewer than MAX_STROKES
 function buildGlyphVerts(strokes) {
-  const sampled = strokes.map(s => sampleStroke(s, STROKE_PTS));
-  // Pad
-  while (sampled.length < MAX_STROKES) {
-    // ghost stroke: tiny dot at centroid (visually invisible)
-    sampled.push(Array(STROKE_PTS).fill([0.5, 0.5]));
+  // Compute arc length per stroke
+  const S = 60;
+  const strokeData = []; // {dense, lens, arcLen}
+  let totalArcLen = 0;
+  
+  for (const stroke of strokes) {
+    const dense = [];
+    for (const seg of stroke) {
+      const s = S;
+      if (seg.type === 'L') {
+        const [a,b] = seg.pts;
+        for (let i=0;i<=s;i++){const t=i/s;dense.push([a[0]+t*(b[0]-a[0]),a[1]+t*(b[1]-a[1])]);}
+      } else if (seg.type === 'Q') {
+        const [a,b,c] = seg.pts;
+        for(let i=0;i<=s;i++) dense.push(quadPt(a,b,c,i/s));
+      } else if (seg.type === 'C') {
+        const [a,b,c,d] = seg.pts;
+        for(let i=0;i<=s;i++) dense.push(cubicPt(a,b,c,d,i/s));
+      } else if (seg.type === 'arc') {
+        for(let i=0;i<=s;i++){const a=seg.a0+(seg.a1-seg.a0)*i/s;dense.push([seg.cx+Math.cos(a)*seg.rx,seg.cy+Math.sin(a)*seg.ry]);}
+      }
+    }
+    if (dense.length < 2) { strokeData.push({dense:[[0.5,0.5],[0.5,0.5]],lens:[0,0],arcLen:0}); continue; }
+    const lens = [0];
+    for (let i=1;i<dense.length;i++){
+      const dx=dense[i][0]-dense[i-1][0],dy=dense[i][1]-dense[i-1][1];
+      lens.push(lens[i-1]+Math.sqrt(dx*dx+dy*dy));
+    }
+    const arcLen = lens[lens.length-1];
+    strokeData.push({dense, lens, arcLen});
+    totalArcLen += arcLen;
   }
-  const flat = new Float32Array(VERTS_PER_G * FLOATS_PER_V);
-  let k = 0;
-  for (const pts of sampled) {
-    for (const [x,y] of pts) { flat[k++]=x; flat[k++]=y; }
+
+  function samplePathAt(sd, targetLen) {
+    const {dense, lens} = sd;
+    if (!lens || lens.length < 2) return dense[0] || [0.5,0.5];
+    let j = lens.findIndex(l => l >= targetLen);
+    if (j < 0) return dense[dense.length-1];
+    if (j === 0) return dense[0];
+    const t = (targetLen - lens[j-1]) / (lens[j] - lens[j-1] + 1e-9);
+    return [dense[j-1][0]+t*(dense[j][0]-dense[j-1][0]), dense[j-1][1]+t*(dense[j][1]-dense[j-1][1])];
   }
+
+  if (totalArcLen < 0.001) {
+    return new Float32Array(MAX_STROKES * STROKE_PTS * 2).fill(0.5);
+  }
+
+  // Assign stroke SLOTS proportional to arc length, minimum 1 slot per real stroke
+  const nReal = strokeData.filter(s => s.arcLen > 0).length;
+  const slotAssign = []; // slotAssign[strokeIdx] = number of slots
+  let slotsLeft = MAX_STROKES;
+
+  // First pass: assign 1 slot per real stroke
+  for (let i = 0; i < strokeData.length; i++) {
+    if (strokeData[i].arcLen > 0) {
+      slotAssign.push(1);
+      slotsLeft--;
+    } else {
+      slotAssign.push(0);
+    }
+  }
+
+  // Second pass: distribute remaining slots proportionally by arc length
+  while (slotsLeft > 0) {
+    // Find which stroke would benefit most from an extra slot
+    // (the one with the highest arc-length-per-slot ratio)
+    let bestIdx = -1, bestRatio = 0;
+    for (let i = 0; i < strokeData.length; i++) {
+      if (slotAssign[i] === 0) continue;
+      const ratio = strokeData[i].arcLen / slotAssign[i];
+      if (ratio > bestRatio) { bestRatio = ratio; bestIdx = i; }
+    }
+    if (bestIdx < 0) break;
+    slotAssign[bestIdx]++;
+    slotsLeft--;
+  }
+
+  // Build vertex buffer: each assigned slot gets STROKE_PTS points along its stroke
+  const flat = new Float32Array(MAX_STROKES * STROKE_PTS * 2);
+  let slotIdx = 0;
+  for (let si = 0; si < strokeData.length; si++) {
+    const nSlots = slotAssign[si];
+    if (nSlots === 0) continue;
+    const sd = strokeData[si];
+    const totalPts = nSlots * STROKE_PTS;
+    
+    for (let slot = 0; slot < nSlots; slot++) {
+      for (let p = 0; p < STROKE_PTS; p++) {
+        const globalPtIdx = slot * STROKE_PTS + p;
+        const target = sd.arcLen * globalPtIdx / (totalPts - 1);
+        const pt = samplePathAt(sd, target);
+        const fi = (slotIdx * STROKE_PTS + p) * 2;
+        flat[fi] = pt[0];
+        flat[fi+1] = pt[1];
+      }
+      slotIdx++;
+    }
+  }
+
+  // Fill any remaining slots (if strokes.length was 0) with center
+  while (slotIdx < MAX_STROKES) {
+    for (let p = 0; p < STROKE_PTS; p++) {
+      const fi = (slotIdx * STROKE_PTS + p) * 2;
+      flat[fi] = 0.5;
+      flat[fi+1] = 0.5;
+    }
+    slotIdx++;
+  }
+
   return flat;
 }
 
@@ -109,20 +207,9 @@ function buildGlyphVerts(strokes) {
 // Returns the ratio of content width to content height, ignoring degenerate ghost strokes
 function computeGlyphAspect(flat) {
   let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;
-  // Check all points, but skip ghost strokes (all points at 0.5,0.5)
-  for(let s=0;s<MAX_STROKES;s++){
-    let allSame=true;
-    for(let p=1;p<STROKE_PTS;p++){
-      const bi=(s*STROKE_PTS+p)*2;
-      const pb=(s*STROKE_PTS)*2;
-      if(Math.abs(flat[bi]-flat[pb])>0.001||Math.abs(flat[bi+1]-flat[pb+1])>0.001){allSame=false;break;}
-    }
-    if(allSame)continue;
-    for(let p=0;p<STROKE_PTS;p++){
-      const bi=(s*STROKE_PTS+p)*2;
-      x0=Math.min(x0,flat[bi]);x1=Math.max(x1,flat[bi]);
-      y0=Math.min(y0,flat[bi+1]);y1=Math.max(y1,flat[bi+1]);
-    }
+  for(let i=0;i<flat.length;i+=2){
+    x0=Math.min(x0,flat[i]);x1=Math.max(x1,flat[i]);
+    y0=Math.min(y0,flat[i+1]);y1=Math.max(y1,flat[i+1]);
   }
   const w=x1-x0,h=y1-y0;
   if(w<0.001||h<0.001)return 1.0;
@@ -571,94 +658,156 @@ async function main(){
   const LINE_HALF_WIDTH=0.5;
   const CELL_STRIDE=24;
 
+  // Round-cap instanced lines: each instance = segment quad + round cap at each end
+  // With max blend, overlapping caps at joints form perfect round joins
+  const CAP_SEGS = 2; // two triangles per semicircle cap, good round join coverage
+  const VERTS_PER_INST = 6 + CAP_SEGS * 3 * 2; // 18: quad + 2 two-tri caps
+
   function buildWGSL(){return `
-struct Uniforms{cols:u32,rows:u32,cellW:f32,cellH:f32,vpW:f32,vpH:f32,halfW:f32,scrollY:f32,zoom:f32,panX:f32,panY:f32,pad:f32,};
-struct CellData{morphT:f32,alpha:f32,glyphA:u32,glyphB:u32,lineHW:f32,flags:u32,};
+struct Uniforms{cols:u32,rows:u32,cellW:f32,cellH:f32,vpW:f32,vpH:f32,halfW:f32,scrollY:f32,zoom:f32,panX:f32,panY:f32,time:f32,};
+struct CellData{morphT:f32,alpha:f32,glyphA:u32,glyphB:u32,lineHW:f32,banWeight:f32,};
 @group(0)@binding(0) var<uniform> uni:Uniforms;
 @group(0)@binding(1) var<storage,read> gBuf:array<f32>;
 @group(0)@binding(2) var<storage,read> cells:array<CellData>;
 @group(0)@binding(3) var<storage,read> gAspect:array<f32>;
-struct VSOut{@builtin(position) pos:vec4f,@location(0) alpha:f32,@location(1) edgeDist:f32,@location(2) color:f32,};
+struct VSOut{@builtin(position) pos:vec4f,@location(0) alpha:f32,@location(1) lineCoord:vec2f,@location(2) color:f32,};
 const SPS:u32=${STROKE_PTS}u;const MS:u32=${MAX_STROKES}u;const VPG:u32=${VERTS_PER_G}u;
+const CAP_S:u32=${CAP_SEGS}u;
+const PI:f32=3.14159265;
 fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b],gBuf[b+1u]);}
+
+fn toClip(px:vec2f)->vec2f{
+  return vec2f((px.x/uni.vpW*2.0-1.0)*uni.zoom+uni.panX,(1.0-px.y/uni.vpH*2.0)*uni.zoom+uni.panY);
+}
+
 @vertex fn vs(@builtin(vertex_index) vi:u32,@builtin(instance_index) ii:u32)->VSOut{
   let sps=SPS-1u;let spc=MS*sps;let ci=ii/spc;let rem=ii%spc;let si=rem/sps;let sgi=rem%sps;
   let col=ci%uni.cols;let row=ci/uni.cols;let cell=cells[ci];
   let vA0=gp(cell.glyphA,si,sgi);let vA1=gp(cell.glyphA,si,sgi+1u);
   let vB0=gp(cell.glyphB,si,sgi);let vB1=gp(cell.glyphB,si,sgi+1u);
   let t=cell.morphT;let p0=vA0+t*(vB0-vA0);let p1=vA1+t*(vB1-vA1);
-  let useBanSizing=(cell.flags&1u)==1u;
-  let inBanZone=(cell.flags&2u)==2u;
+  let bwRaw=cell.banWeight;
+  let inBanZone=bwRaw>=1.5;  // 2.0 added when in banner zone
+  let bw=select(bwRaw,bwRaw-2.0,inBanZone);  // extract sizing weight 0-1
   let cx=f32(col)*uni.cellW;let cy=f32(row)*uni.cellH;
   var sx:f32;var sy:f32;var oxF:f32;var oyF:f32;
-  if(useBanSizing){
-    sx=uni.cellW;sy=uni.cellH;oxF=0.0;oyF=0.0;
-  } else {
-    let padSx=f32(${SW});let padSy=f32(${SH});
-    let aspA=gAspect[cell.glyphA];let aspB=gAspect[cell.glyphB];
-    let ga=aspA+(aspB-aspA)*t;
-    let cellAsp=padSx/padSy;
-    if(ga>cellAsp){sx=padSx;sy=padSx/ga;}
-    else{sy=padSy;sx=padSy*ga;}
-    oxF=(uni.cellW-sx)*0.5;
-    oyF=(uni.cellH-sy)*0.5;
-  }
+  // Compute both sizing modes and interpolate
+  let banSx=uni.cellW;let banSy=uni.cellH;let banOx=0.0;let banOy=0.0;
+  let padSx=f32(${SW});let padSy=f32(${SH});
+  let aspA=gAspect[cell.glyphA];let aspB=gAspect[cell.glyphB];
+  let ga=aspA+(aspB-aspA)*t;
+  let cellAsp=padSx/padSy;
+  var normSx:f32;var normSy:f32;
+  if(ga>cellAsp){normSx=padSx;normSy=padSx/ga;}
+  else{normSy=padSy;normSx=padSy*ga;}
+  let normOx=(uni.cellW-normSx)*0.5;
+  let normOy=(uni.cellH-normSy)*0.5;
+  // Smooth interpolation
+  sx=normSx+(banSx-normSx)*bw;
+  sy=normSy+(banSy-normSy)*bw;
+  oxF=normOx+(banOx-normOx)*bw;
+  oyF=normOy+(banOy-normOy)*bw;
   let px0=vec2f(cx+oxF+p0.x*sx,cy+oyF+p0.y*sy);
   let px1=vec2f(cx+oxF+p1.x*sx,cy+oyF+p1.y*sy);
   let dir=px1-px0;let segLen=length(dir);
   let ndir=select(vec2f(1.0,0.0),dir/segLen,segLen>0.0001);
-  let segPerp=vec2f(-ndir.y,ndir.x);
+  let perp=vec2f(-ndir.y,ndir.x);
+  let baseHW=cell.lineHW;
 
-  // Miter at px0: average direction with previous segment
-  let hasPrev=sgi>0u;
-  let prevPtA=gp(cell.glyphA,si,select(0u,sgi-1u,hasPrev));
-  let prevPtB=gp(cell.glyphB,si,select(0u,sgi-1u,hasPrev));
-  let pPrev=prevPtA+t*(prevPtB-prevPtA);
-  let pxPrev=vec2f(cx+oxF+pPrev.x*sx,cy+oyF+pPrev.y*sy);
-  let prevDir=px0-pxPrev;let prevLen=length(prevDir);
-  let nprev=select(ndir,prevDir/prevLen,hasPrev&&prevLen>0.0001);
-  let cosAngle0=dot(nprev,ndir);
-  let avg0=ndir+nprev;let avg0Len=length(avg0);
-  // For sharp angles (cos < 0.2, i.e. >~80° bend), use segment perpendicular (bevel)
-  let useAvg0=avg0Len>0.01&&cosAngle0>0.2;
-  let miterDir0=select(ndir,avg0/avg0Len,useAvg0);
-  let miterPerp0=vec2f(-miterDir0.y,miterDir0.x);
-  let dot0=max(abs(dot(miterPerp0,segPerp)),0.7);
-  let perp0=miterPerp0*cell.lineHW/dot0;
+  // Variable width based on glyph-space position (smooth across stroke boundaries)
+  let cellPhase=f32(ci)*2.399;
 
-  // Miter at px1: average direction with next segment
-  let hasNext=sgi<SPS-2u;
-  let nextPtA=gp(cell.glyphA,si,select(SPS-1u,sgi+2u,hasNext));
-  let nextPtB=gp(cell.glyphB,si,select(SPS-1u,sgi+2u,hasNext));
-  let pNext=nextPtA+t*(nextPtB-nextPtA);
-  let pxNext=vec2f(cx+oxF+pNext.x*sx,cy+oyF+pNext.y*sy);
-  let nextDir=pxNext-px1;let nextLen=length(nextDir);
-  let nnext=select(ndir,nextDir/nextLen,hasNext&&nextLen>0.0001);
-  let cosAngle1=dot(ndir,nnext);
-  let avg1=ndir+nnext;let avg1Len=length(avg1);
-  let useAvg1=avg1Len>0.01&&cosAngle1>0.2;
-  let miterDir1=select(ndir,avg1/avg1Len,useAvg1);
-  let miterPerp1=vec2f(-miterDir1.y,miterDir1.x);
-  let dot1=max(abs(dot(miterPerp1,segPerp)),0.7);
-  let perp1=miterPerp1*cell.lineHW/dot1;
+  // Use a gentle spatial field — low frequency waves across the glyph
+  let sp0=p0.x*2.0+p0.y*2.0;
+  let w0=sin(sp0*3.14159-uni.time*0.5+cellPhase)*0.5+0.5;
+  let mod0=mix(0.4,1.0,w0);
 
-  let ci2=array<u32,6>(0u,1u,2u,1u,3u,2u)[vi];
-  var px:vec2f;var edge:f32;
-  switch(ci2){case 0u:{px=px0-perp0;edge=-1.0;}case 1u:{px=px0+perp0;edge=1.0;}case 2u:{px=px1-perp1;edge=-1.0;}case 3u:{px=px1+perp1;edge=1.0;}default:{px=px0;edge=0.0;}}
+  let sp1=p1.x*2.0+p1.y*2.0;
+  let w1=sin(sp1*3.14159-uni.time*0.5+cellPhase)*0.5+0.5;
+  let mod1=mix(0.4,1.0,w1);
+
+  // Smoothly reduce modulation as banWeight increases (banner = constant width)
+  let modDepth=1.0-bw;  // 1 for background, 0 for full banner
+  let hw0=baseHW*mix(1.0,mod0,modDepth);
+  let hw1=baseHW*mix(1.0,mod1,modDepth);
+  let isGhost=segLen<0.0001;
+
   var out:VSOut;
-  out.pos=vec4f((px.x/uni.vpW*2.0-1.0)*uni.zoom+uni.panX,(1.0-px.y/uni.vpH*2.0)*uni.zoom+uni.panY,0.0,1.0);
-  out.alpha=cell.alpha;out.edgeDist=edge;
+  out.alpha=cell.alpha;
   out.color=select(0.0,1.0,inBanZone);
-  return out;}
+  out.lineCoord=vec2f(0.0,0.0);
+
+  // Collapse ghost segments to a single degenerate point
+  if(isGhost){
+    out.pos=vec4f(toClip(px0),0.0,1.0);
+    return out;
+  }
+
+  var px:vec2f;
+
+  if(vi<6u){
+    // Main quad — the segment body with variable width at each end
+    let ci2=array<u32,6>(0u,1u,2u,1u,3u,2u)[vi];
+    switch(ci2){
+      case 0u:{px=px0-perp*hw0; out.lineCoord=vec2f(0.0,-1.0);}
+      case 1u:{px=px0+perp*hw0; out.lineCoord=vec2f(0.0,1.0);}
+      case 2u:{px=px1-perp*hw1; out.lineCoord=vec2f(0.0,-1.0);}
+      case 3u:{px=px1+perp*hw1; out.lineCoord=vec2f(0.0,1.0);}
+      default:{px=px0; out.lineCoord=vec2f(0.0,0.0);}
+    }
+  } else {
+    // Round caps at both endpoints
+    let capVi=vi-6u;
+    let capEnd=capVi/(CAP_S*3u);  // 0 = cap at px0, 1 = cap at px1
+    let fanVi=capVi%(CAP_S*3u);
+    let triIdx=fanVi/3u;
+    let vertIdx=fanVi%3u;
+
+    let center=select(px0,px1,capEnd==1u);
+    let capHW=select(hw0,hw1,capEnd==1u);
+    // Cap direction: at px0 we face backwards (-ndir), at px1 we face forwards (+ndir)
+    let capDir=select(-ndir,ndir,capEnd==1u);
+    let capPerp=vec2f(-capDir.y,capDir.x);
+
+    // Fan from perp to -perp (semicircle on the cap side)
+    let a0=PI*f32(triIdx)/f32(CAP_S);
+    let a1=PI*f32(triIdx+1u)/f32(CAP_S);
+
+    if(vertIdx==0u){
+      px=center;
+      out.lineCoord=vec2f(0.0,0.0);
+    } else {
+      let ang=select(a0,a1,vertIdx==2u);
+      let localX=cos(ang);  // along capPerp (width)
+      let localY=sin(ang);  // along capDir (outward from segment)
+      px=center+capPerp*localX*capHW+capDir*localY*capHW;
+      // lineCoord: x = signed cap distance (0 at body, ±1 at tip)
+      //            y = signed lateral distance (-1 to 1 at edges)
+      let capSign=select(-1.0,1.0,capEnd==1u);
+      out.lineCoord=vec2f(localY*capSign,localX);
+    }
+  }
+
+  out.pos=vec4f(toClip(px),0.0,1.0);
+  return out;
+}
 @fragment fn fs(in:VSOut)->@location(0) vec4f{
-  let d=abs(in.edgeDist);let aa=1.0-smoothstep(0.55,1.0,d);
+  // SDF anti-aliasing using lineCoord
+  // d=0 at center, d=1 at geometry edge
+  // Solid core to ~0.45, fade to 0.85 matches original stroke visual width
+  let d=length(in.lineCoord);
+  let aa=1.0-smoothstep(0.45,0.85,d);
+  if(aa<0.005){discard;}
   let a=in.alpha*aa;
   let col=mix(vec3f(0.72,0.70,0.82),vec3f(1.0,0.98,0.94),in.color);
   return vec4f(col*a,a);}
 `;}
 
   const uniformBuf=device.createBuffer({size:48,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-  let maxCells=0,cellBuf=null,cellData=null;
+  const uniformBuf_AB=new ArrayBuffer(48);
+  const uniformF=new Float32Array(uniformBuf_AB);
+  const uniformU=new Uint32Array(uniformBuf_AB);
+  let maxCells=0,cellBuf=null,cellData=null,cellView=null;
   let glyphBuf=null, aspectBuf=null, pipeline=null, bindGroup=null, msaaTexture=null;
   let curNTotal=0;
 
@@ -671,7 +820,7 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
 
   function ensureCellBuf(n){if(n<=maxCells)return;if(cellBuf)cellBuf.destroy();maxCells=n;
     cellBuf=device.createBuffer({size:maxCells*CELL_STRIDE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
-    cellData=new ArrayBuffer(maxCells*CELL_STRIDE);}
+    cellData=new ArrayBuffer(maxCells*CELL_STRIDE);cellView=new DataView(cellData);}
   function createMSAATexture(){if(msaaTexture)msaaTexture.destroy();
     msaaTexture=device.createTexture({size:[W,H],sampleCount:4,format:fmt,usage:GPUTextureUsage.RENDER_ATTACHMENT});}
 
@@ -748,6 +897,7 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
 
   // ── Floaters ──
   const floaters=[];
+  let cgBuf=null;
 
   // ── Functions outside frame() so they're not recreated ──
   function pickBg(col,row,noise,t_){
@@ -780,11 +930,71 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
 
     // Draw the live trace in screen space (no zoom transform — follows the finger)
     if(drawing&&drawPoints.length>=2){
-      octx.strokeStyle='rgba(255,252,240,0.7)';octx.lineWidth=3;
-      octx.lineCap='round';octx.lineJoin='round';octx.beginPath();
-      octx.moveTo(drawPoints[0].x,drawPoints[0].y);
-      for(let i=1;i<drawPoints.length;i++)octx.lineTo(drawPoints[i].x,drawPoints[i].y);
-      octx.stroke();
+      // Smooth the raw points with Chaikin subdivision (2 passes)
+      let pts=drawPoints.map(p=>[p.x,p.y]);
+      for(let pass=0;pass<2;pass++){
+        const npts=[[...pts[0]]];
+        for(let i=0;i<pts.length-1;i++){
+          const ax=pts[i][0],ay=pts[i][1],bx=pts[i+1][0],by=pts[i+1][1];
+          npts.push([ax*0.75+bx*0.25,ay*0.75+by*0.25]);
+          npts.push([ax*0.25+bx*0.75,ay*0.25+by*0.75]);
+        }
+        npts.push([...pts[pts.length-1]]);
+        pts=npts;
+      }
+
+      // Compute arc lengths for variable width
+      const lens=[0];
+      for(let i=1;i<pts.length;i++){
+        const dx=pts[i][0]-pts[i-1][0],dy=pts[i][1]-pts[i-1][1];
+        lens.push(lens[i-1]+Math.sqrt(dx*dx+dy*dy));
+      }
+      const totalLen=lens[lens.length-1];
+      if(totalLen>1&&pts.length>=3){
+        // Build left and right outlines with variable width
+        const leftPts=[],rightPts=[];
+        const baseW=2.0;
+        const time=t*0.016;
+        for(let i=0;i<pts.length;i++){
+          // Tangent direction
+          let tx,ty;
+          if(i===0){tx=pts[1][0]-pts[0][0];ty=pts[1][1]-pts[0][1];}
+          else if(i===pts.length-1){tx=pts[i][0]-pts[i-1][0];ty=pts[i][1]-pts[i-1][1];}
+          else{tx=pts[i+1][0]-pts[i-1][0];ty=pts[i+1][1]-pts[i-1][1];}
+          const tl=Math.sqrt(tx*tx+ty*ty);
+          if(tl<0.001)continue;
+          tx/=tl;ty/=tl;
+          const nx=-ty,ny=tx;
+
+          // Variable width: wave along arc length + taper at ends
+          const frac=totalLen>0?lens[i]/totalLen:0;
+          const taper=Math.sin(frac*Math.PI); // 0 at start/end, 1 at middle
+          const wave=Math.sin(frac*Math.PI*2-time*0.5)*0.3+0.7; // 0.4-1.0
+          const w=baseW*taper*wave;
+
+          leftPts.push([pts[i][0]+nx*w,pts[i][1]+ny*w]);
+          rightPts.push([pts[i][0]-nx*w,pts[i][1]-ny*w]);
+        }
+
+        // Draw as filled shape — solid white like banner letters
+        if(leftPts.length>=2){
+          octx.fillStyle='rgba(255,252,240,0.85)';
+          octx.beginPath();
+          octx.moveTo(leftPts[0][0],leftPts[0][1]);
+          for(let i=1;i<leftPts.length;i++)octx.lineTo(leftPts[i][0],leftPts[i][1]);
+          for(let i=rightPts.length-1;i>=0;i--)octx.lineTo(rightPts[i][0],rightPts[i][1]);
+          octx.closePath();
+          octx.fill();
+
+          // Thin bright center stroke for crisp definition
+          octx.strokeStyle='rgba(255,252,240,0.95)';
+          octx.lineWidth=0.8;octx.lineCap='round';octx.lineJoin='round';
+          octx.beginPath();
+          octx.moveTo(pts[0][0],pts[0][1]);
+          for(let i=1;i<pts.length;i++)octx.lineTo(pts[i][0],pts[i][1]);
+          octx.stroke();
+        }
+      }
     }
 
     if(floaters.length===0)return;
@@ -796,65 +1006,72 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
     octx.scale(zoomLevel,zoomLevel);
     octx.translate(-cx,-cy);
 
-    // Build cell→glyph lookup once
-    const cg=new Int32Array(nCells);
+    // Build cell→glyph lookup
+    if(!cgBuf||cgBuf.length<nCells)cgBuf=new Int32Array(nCells);
     for(let i=0;i<nCells&&i<cellStates.length;i++){
       const cs=cellStates[i];
-      cg[i]=cs.bannerGlyph>=0?-1:(cs.morphT<0.5?cs.glyphA:cs.glyphB);
-    }
-    const claimed=new Set(),dead=new Set();
-
-    // Move all
-    for(const f of floaters){
-      const tx=(f.tc+0.5)*CELL_W/dpr,ty=(f.tr+0.5)*CELL_H/dpr;
-      const dx=tx-f.x,dy=ty-f.y,d=Math.sqrt(dx*dx+dy*dy);
-      if(d>0.5){f.vx+=dx/d*0.05;f.vy+=dy/d*0.05;}
-      f.vx*=0.96;f.vy*=0.96;f.x+=f.vx;f.y+=f.vy;
-      f.sz+=(f.esz-f.sz)*0.06;f._d=d;f._s2=f.vx*f.vx+f.vy*f.vy;
+      cgBuf[i]=cs.bannerGlyph>=0?-1:(cs.morphT<0.5?cs.glyphA:cs.glyphB);
     }
 
-    // Resolve — sorted closest first
-    floaters.sort((a,b)=>a._d-b._d);
+    const dead=[];
+
     for(let fi=0;fi<floaters.length;fi++){
       const f=floaters[fi];
-      // Land?
-      if(f._d<10&&f._s2<0.64){
-        const fc=Math.floor(f.x*dpr/CELL_W),fr=Math.floor(f.y*dpr/CELL_H);
-        let ok=false;
-        for(let dr=-1;dr<=1&&!ok;dr++)for(let dc=-1;dc<=1&&!ok;dc++){
-          const nc=fc+dc,nr=fr+dr;
-          if(nc<0||nc>=COLS||nr<0||nr>=ROWS)continue;
-          const ci=nr*COLS+nc;
-          if(!claimed.has(ci)&&cg[ci]===f.gi){cellStates[ci].landPulse=1;dead.add(fi);ok=true;}
-        }
-        if(ok)continue;
+      const tx=(f.tc+0.5)*CELL_W/dpr,ty=(f.tr+0.5)*CELL_H/dpr;
+      const dx=tx-f.x,dy=ty-f.y,d=Math.sqrt(dx*dx+dy*dy);
+
+      // Increase attraction as floater gets closer — snappier landing
+      const acc=d<30?0.25:0.15;
+      if(d>0.5){f.vx+=dx/d*acc;f.vy+=dy/d*acc;}
+      f.vx*=0.92;f.vy*=0.92;f.x+=f.vx;f.y+=f.vy;
+      f.sz+=(f.esz-f.sz)*0.08;
+      const spd2=f.vx*f.vx+f.vy*f.vy;
+
+      // Check if target cell currently shows our glyph
+      const tci=f.tr*COLS+f.tc;
+      const targetMatch=tci>=0&&tci<nCells&&cgBuf[tci]===f.gi;
+
+      // Land only if close, slow, and target cell shows our glyph
+      if(d<8&&spd2<1.0&&targetMatch){
+        cellStates[tci].landPulse=1;
+        dead.push(fi);
+        continue;
       }
-      // Retarget (staggered local)
-      if(t%10===(fi%10)){
+
+      // Retarget: if close to target but it doesn't match, find a nearby cell that does
+      if(d<20||(!targetMatch&&t%5===(fi%5))){
         const fc=Math.floor(f.x*dpr/CELL_W),fr=Math.floor(f.y*dpr/CELL_H);
-        const R=12;let bci=-1,bd=Infinity;
+        const R=8;let bci=-1,bd=Infinity;
         const r0=Math.max(0,fr-R),r1=Math.min(ROWS-1,fr+R);
         const c0=Math.max(0,fc-R),c1=Math.min(COLS-1,fc+R);
         for(let row=r0;row<=r1;row++)for(let col=c0;col<=c1;col++){
           const ci=row*COLS+col;
-          if(claimed.has(ci)||cg[ci]!==f.gi)continue;
-          const dx=(col+0.5)*CELL_W/dpr-f.x,dy=(row+0.5)*CELL_H/dpr-f.y;
-          const d=dx*dx+dy*dy;if(d<bd){bd=d;bci=ci;}
+          if(cgBuf[ci]!==f.gi)continue;
+          const ddx=(col+0.5)*CELL_W/dpr-f.x,ddy=(row+0.5)*CELL_H/dpr-f.y;
+          const dd=ddx*ddx+ddy*ddy;if(dd<bd){bd=dd;bci=ci;}
         }
         if(bci>=0){f.tc=bci%COLS;f.tr=(bci/COLS)|0;}
       }
-      claimed.add(f.tr*COLS+f.tc);
-      f.a=Math.min(1,f._d/40)*0.8;
+
+      // Fade: visible while in flight, fade out as it approaches
+      f.a=Math.min(1,d/25)*0.7;
     }
 
-    // Remove dead
-    if(dead.size>0)for(let i=floaters.length-1;i>=0;i--)if(dead.has(i))floaters.splice(i,1);
+    // Remove dead (reverse order to preserve indices)
+    for(let i=dead.length-1;i>=0;i--)floaters.splice(dead[i],1);
 
-    // Draw
+    // Draw remaining floaters — transition from bright white to glyph color
     for(const f of floaters){
       if(f.a<0.01)continue;
-      octx.strokeStyle=`rgba(255,252,240,${f.a.toFixed(2)})`;
-      octx.lineWidth=1.5/zoomLevel;octx.lineCap='round';octx.lineJoin='round';
+      f.age=(f.age||0)+1;
+      const ageFrac=Math.min(1,f.age/90); // transition over ~1.5 seconds
+      // Interpolate from white (255,252,240) to glyph lavender (184,181,172)
+      const r=Math.round(255-ageFrac*71);
+      const g=Math.round(252-ageFrac*71);
+      const b=Math.round(240-ageFrac*68);
+      const a=f.a*(1-ageFrac*0.3); // also slightly reduce alpha as it ages
+      octx.strokeStyle=`rgba(${r},${g},${b},${a.toFixed(2)})`;
+      octx.lineWidth=1.2/zoomLevel;octx.lineCap='round';octx.lineJoin='round';
       const sz=f.sz,hx=f.x-sz/2,hy=f.y-sz/2;
       for(let s=0;s<MAX_STROKES;s++){
         octx.beginPath();let has=false;
@@ -890,6 +1107,7 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
       bannerInstGrid=new Int16Array(nCells).fill(-1);
       for(const key in textMap){const te=textMap[key],p=key.split(','),ci=(+p[1])*COLS+(+p[0]);
         bannerGrid[ci]=te.glyphIdx;bannerInstGrid[ci]=te.instanceIdx;}
+      bannerTotal=0;for(let i=0;i<nCells;i++)if(bannerGrid[i]>=0)bannerTotal++;
 
       initCells(nCells);ensureCellBuf(nCells);rebuildGlyphBufAndPipeline(cr);
       for(let i=0;i<nCells;i++)if(bannerGrid[i]>=0){const cs=cellStates[i];
@@ -900,19 +1118,15 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
     if(!pipeline||!cellBuf){requestAnimationFrame(frame);return;}
 
     // Write uniforms every frame (zoom/pan can change)
-    {const u=new ArrayBuffer(48),ui=new Uint32Array(u),uf=new Float32Array(u);
-    ui[0]=COLS;ui[1]=ROWS;uf[2]=CELL_W;uf[3]=CELL_H;uf[4]=W;uf[5]=H;uf[6]=LINE_HALF_WIDTH*dpr;uf[7]=0;
-    uf[8]=zoomLevel;uf[9]=panX;uf[10]=panY;uf[11]=0;
-    device.queue.writeBuffer(uniformBuf,0,u);}
+    uniformF[0]=COLS;uniformF[1]=ROWS;uniformF[2]=CELL_W;uniformF[3]=CELL_H;uniformF[4]=W;uniformF[5]=H;uniformF[6]=LINE_HALF_WIDTH*dpr;uniformF[7]=0;
+    uniformF[8]=zoomLevel;uniformF[9]=panX;uniformF[10]=panY;uniformF[11]=t*0.016;
+    uniformU[0]=COLS;uniformU[1]=ROWS;
+    device.queue.writeBuffer(uniformBuf,0,uniformBuf_AB);
 
-    // bannerGrid is static (built on resize)
-    bannerTotal=0;bannerFlickering=0;
-    for(let i=0;i<nCells&&i<cellStates.length;i++){
-      if(bannerGrid[i]>=0){bannerTotal++;if(cellStates[i].flickerTimer>0)bannerFlickering++;}
-    }
     const baseHW=LINE_HALF_WIDTH*dpr;
     const bHW=baseHW*2.2+Math.sin(t*0.07)*baseHW*0.5;
-    const view32=new DataView(cellData);
+    const banBgHW=baseHW*1.35+Math.sin(t*0.07)*baseHW*0.15;
+    bannerFlickering=0;
 
     for(let row=0;row<ROWS;row++){for(let col=0;col<COLS;col++){
       const idx=row*COLS+col,cs=cellStates[idx];
@@ -921,6 +1135,10 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
       cs.noiseVal+=(Math.random()-0.5)*0.14;cs.noiseVal*=0.96;
 
       let desired;
+      // Count this cell as flickering if it's in banner zone but not fully showing banner
+      if(inBZ && !(cs.glyphA===bi && cs.glyphB===bi && cs.morphT>=1)){
+        bannerFlickering++;
+      }
       if(inBZ){desired=cs.flickerTimer>0?pickBg(col,row,cs.noiseVal,t):(cs.isBanner=true,bi);}
       else desired=pickBg(col,row,cs.noiseVal,t);
 
@@ -929,8 +1147,8 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
 
       if(inBZ&&cs.morphT>=1){cs.glyphA=cs.glyphB;
         if(cs.flickerTimer>0){cs.flickerTimer--;if(cs.flickerTimer<=0)cs.isBanner=true;}
-        else if(Math.random()<0.004&&bannerFlickering<bannerTotal*0.10){
-          cs.isBanner=false;cs.flickerTimer=1+Math.floor(Math.random()*10);bannerFlickering++;}}
+        else if(Math.random()<0.0005&&bannerFlickering<bannerTotal*0.10){
+          cs.isBanner=false;cs.flickerTimer=1+Math.floor(Math.random()*6);bannerFlickering++;}}
 
       let aR=0;for(const w of alphaWaves)aR+=Math.sin(col*w.kx+row*w.ky+t*w.speed+w.phase);
       const aM=(aR+aN)/(aN*2)*ALPHA_CYCLES,frac=((aM%1)+1)%1;
@@ -938,8 +1156,6 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
 
       const lb=cs.landPulse*baseHW*3;cs.landPulse*=0.88;if(cs.landPulse<0.01)cs.landPulse=0;
       const bgHW=baseHW+lb;
-      // Banner-zone bg glyphs: slightly thicker than pure background, with subtle pulse
-      const banBgHW=baseHW*1.35+Math.sin(t*0.07)*baseHW*0.15;
       // Smooth stroke width based on morph progress toward/away from banner glyph
       let hw;
       if(!inBZ){
@@ -953,15 +1169,21 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
         else if(aIsBan&&!bIsBan){ hw=bHW+(banBgHW-bHW)*cs.morphT; }  // morphing away from banner
         else { hw=banBgHW+(bHW-banBgHW)*cs.morphT; }  // morphing toward banner
       }
-      // flags: bit 0 = use banner cell sizing, bit 1 = in banner zone (for color)
-      const curGlyph=cs.morphT<0.5?cs.glyphA:cs.glyphB;
-      const flagBanSizing=inBZ&&curGlyph===bi?1:0;
-      const flagBanZone=inBZ?2:0;
+      // Banner sizing weight: smoothly interpolated 0-1 based on morphT and which glyph is banner
+      const aIsBanGlyph = cs.glyphA === bi;
+      const bIsBanGlyph = cs.glyphB === bi;
+      let banSizingWeight = 0;
+      if (inBZ) {
+        if (aIsBanGlyph && bIsBanGlyph) banSizingWeight = 1;
+        else if (!aIsBanGlyph && !bIsBanGlyph) banSizingWeight = 0;
+        else if (bIsBanGlyph) banSizingWeight = cs.morphT;
+        else banSizingWeight = 1 - cs.morphT;
+      }
 
       const off=idx*CELL_STRIDE;
-      view32.setFloat32(off,cs.morphT,true);view32.setFloat32(off+4,alpha,true);
-      view32.setUint32(off+8,cs.glyphA,true);view32.setUint32(off+12,cs.glyphB,true);
-      view32.setFloat32(off+16,hw,true);view32.setUint32(off+20,flagBanSizing|flagBanZone,true);
+      cellView.setFloat32(off,cs.morphT,true);cellView.setFloat32(off+4,alpha,true);
+      cellView.setUint32(off+8,cs.glyphA,true);cellView.setUint32(off+12,cs.glyphB,true);
+      cellView.setFloat32(off+16,hw,true);cellView.setFloat32(off+20,banSizingWeight + (inBZ ? 2.0 : 0.0),true);
     }}
 
     device.queue.writeBuffer(cellBuf,0,cellData,0,nCells*CELL_STRIDE);
@@ -971,7 +1193,7 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
       resolveTarget:ctx.getCurrentTexture().createView(),
       clearValue:{r:0.039,g:0.039,b:0.039,a:1},loadOp:'clear',storeOp:'discard'}]});
     pass.setPipeline(pipeline);pass.setBindGroup(0,bindGroup);
-    pass.draw(6,nCells*MAX_STROKES*(STROKE_PTS-1),0,0);
+    pass.draw(VERTS_PER_INST,nCells*MAX_STROKES*(STROKE_PTS-1),0,0);
     pass.end();device.queue.submit([enc.finish()]);requestAnimationFrame(frame);}
   requestAnimationFrame(frame);
 
@@ -1104,14 +1326,19 @@ fn gp(g:u32,s:u32,p:u32)->vec2f{let b=g*VPG*2u+s*SPS*2u+p*2u;return vec2f(gBuf[b
     device.queue.writeBuffer(glyphBuf,ri*VERTS_PER_G*2*4,nv);
     device.queue.writeBuffer(aspectBuf,ri*4,new Float32Array([GLYPH_ASPECTS[ri]]));
 
-    // Spawn 50 floaters
+    // Spawn 25 floaters
+    // Convert screen-space draw center to grid coordinate space (undo zoom/pan)
+    const halfW=window.innerWidth/2, halfH=window.innerHeight/2;
+    const gridBcx=((bcx-halfW)/zoomLevel - panX*halfW/zoomLevel) + halfW;
+    const gridBcy=((bcy-halfH)/zoomLevel + panY*halfH/zoomLevel) + halfH;
+    const gridSize=size/zoomLevel;
     const excl=new Set();
-    for(let i=0;i<50;i++){
-      const sx2=bcx+(Math.random()-0.5)*size*0.4,sy2=bcy+(Math.random()-0.5)*size*0.4;
+    for(let i=0;i<25;i++){
+      const sx2=gridBcx+(Math.random()-0.5)*gridSize*0.4,sy2=gridBcy+(Math.random()-0.5)*gridSize*0.4;
       const tg=findTarget(ri,excl,sx2,sy2);excl.add(tg.row*COLS+tg.col);
       floaters.push({x:sx2,y:sy2,vx:(Math.random()-0.5)*2,vy:(Math.random()-0.5)*2,
-        tc:tg.col,tr:tg.row,v:nv,gi:ri,a:0.75,
-        sz:size,esz:Math.min(CELL_W,CELL_H)/dpr*1.2});
+        tc:tg.col,tr:tg.row,v:nv,gi:ri,a:0.75,age:0,
+        sz:gridSize,esz:Math.min(CELL_W,CELL_H)/dpr*1.2});
     }
   }
   cv.addEventListener('mousedown',startDraw);cv.addEventListener('mousemove',moveDraw);
